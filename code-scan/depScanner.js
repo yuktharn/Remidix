@@ -35,6 +35,22 @@ function severityFromOSV(vuln) {
   return "Medium";
 }
 
+// Pulls the first "fixed" version out of an OSV vuln's affected/ranges/events
+// for the given package name, if one is published. Returns null if OSV
+// doesn't specify a fixed version (common for ranges that are still open).
+function extractFixedVersion(detail, packageName) {
+  if (!Array.isArray(detail.affected)) return null;
+  for (const aff of detail.affected) {
+    if (aff.package?.name && aff.package.name !== packageName) continue;
+    for (const range of aff.ranges || []) {
+      for (const event of range.events || []) {
+        if (event.fixed) return event.fixed;
+      }
+    }
+  }
+  return null;
+}
+
 async function scanDependencies(packageJsonContent) {
   const packages = parsePackageJson(packageJsonContent);
   if (packages.length === 0) return [];
@@ -79,6 +95,9 @@ async function scanDependencies(packageJsonContent) {
           packageName: packages[i].name,
           version: packages[i].version,
           vulnId: v.id,
+          publishedDate: detail.published || null,
+          fixedVersion: extractFixedVersion(detail, packages[i].name),
+          osvUrl: `https://osv.dev/vulnerability/${v.id}`,
           explanation: detail.summary || `${packages[i].name}@${packages[i].version} has a known vulnerability (${v.id}).`,
           fix: `Upgrade ${packages[i].name} past the affected range. See ${v.id} for the patched version.`,
           confidence: 0.95,

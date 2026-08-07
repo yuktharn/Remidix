@@ -426,3 +426,14 @@ a { color: #7ec3f5; }
   .pipeline-row { justify-content: flex-start; }
   .pipeline-step { min-width: 45%; }
 }
+
+/* Secrets Detection table */
+.secrets-table-wrap { overflow-x: auto; }
+.secrets-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.secrets-table th {
+  text-align: left; padding: 8px 10px; color: var(--text-faint);
+  font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
+}
+.secrets-table td { padding: 10px; border-top: 1px solid var(--border); vertical-align: middle; }
+
+.risk-side-panel { display: flex; flex-direction: column; gap: 12px; }
