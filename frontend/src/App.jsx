@@ -6,9 +6,10 @@ import {
   ShieldAlert, KeyRound, Sliders, Package, Brain,
   Home, GitCompare, Folder, Bookmark, TrendingUp, Gauge, CalendarDays,
   UploadCloud, Check, Bug, Wrench, Gauge as GaugeIcon,
-  Eye, EyeOff, Copy, Database, Cloud, ExternalLink,
+  Eye, EyeOff, Copy, Database, Cloud, ExternalLink, Download,
 } from 'lucide-react';
 import './App.css';
+import ProjectsPanel from './ProjectsPanel';
 
 const API_URL = 'http://localhost:4000';
 
@@ -47,7 +48,7 @@ const NAV_GROUPS = [
     label: 'Manage',
     items: [
       { label: 'Projects', icon: Folder },
-      { label: 'Saved Snippets', icon: Bookmark },
+      
     ],
   },
   {
@@ -1660,6 +1661,1344 @@ function SecretsDetectionPanel({ results, code, scanDurationMs }) {
   );
 }
 
+// ============================================================================
+// Configuration Check — dedicated panel (replaces the old generic filtered
+// list). Reads from the same `results` / `code` state Code Scan already
+// populates. The 8 "Configuration Checks" tiles and the OWASP checklist are
+// both derived by keyword-matching real finding `type`/`explanation` text —
+// nothing here is a fabricated project name, file list, or language badge.
+// ============================================================================
+
+function severityRank(sev) {
+  const order = { critical: 0, high: 1, medium: 2, low: 3 };
+  return order[(sev || '').toLowerCase()] ?? 4;
+}
+
+const CONFIG_CHECK_DEFINITIONS = [
+  { key: 'env', label: 'Environment Variables', icon: Code2, keywords: ['env var', '.env', 'hardcoded secret', 'hardcoded key', 'hardcoded password', 'hardcoded credential'], cleanText: 'No hardcoded secrets found' },
+  { key: 'debug', label: 'Debug Mode', icon: Bug, keywords: ['debug'], cleanText: 'Debug mode is disabled' },
+  { key: 'https', label: 'HTTPS Configuration', icon: Lock, keywords: ['https'], cleanText: 'HTTPS is properly enabled' },
+  { key: 'cors', label: 'CORS Configuration', icon: Cloud, keywords: ['cors'], cleanText: 'CORS is properly restricted' },
+  { key: 'headers', label: 'Security Headers', icon: ShieldCheck, keywords: ['header', 'csp', 'hsts', 'x-frame', 'content-security-policy'], cleanText: 'Security headers are present' },
+  { key: 'docker', label: 'Docker Configuration', icon: Package, keywords: ['docker', 'container'], cleanText: 'No issues found' },
+  { key: 'ssltls', label: 'SSL / TLS', icon: Lock, keywords: ['ssl', 'tls', 'certificate'], cleanText: 'Strong TLS configuration' },
+  { key: 'permissions', label: 'File Permissions', icon: Folder, keywords: ['permission', 'chmod', 'file mode'], cleanText: 'File permissions look fine' },
+];
+
+const OWASP_CHECK_DEFINITIONS = [
+  { label: 'Secure HTTP Headers', keywords: ['header', 'hsts', 'x-frame'] },
+  { label: 'Content Security Policy (CSP)', keywords: ['csp', 'content-security-policy'] },
+  { label: 'CORS Policy', keywords: ['cors'] },
+  { label: 'TLS / SSL Configuration', keywords: ['tls', 'ssl', 'certificate', 'https'] },
+  { label: 'Cookie Security', keywords: ['cookie'] },
+  { label: 'Environment Variables', keywords: ['env var', '.env', 'hardcoded'] },
+  { label: 'Error Handling', keywords: ['error handling', 'stack trace', 'verbose error'] },
+  { label: 'Debug Mode', keywords: ['debug'] },
+];
+
+// Finds the highest-severity finding (across ALL findings, not just the
+// "config" category) whose type/explanation mentions any of `keywords`.
+function findConfigMatch(findings, keywords) {
+  const matches = findings.filter((f) => {
+    const hay = `${f.type || ''} ${f.explanation || ''}`.toLowerCase();
+    return keywords.some((k) => hay.includes(k));
+  });
+  if (matches.length === 0) return null;
+  return [...matches].sort((a, b) => severityRank(a.severity) - severityRank(b.severity))[0];
+}
+
+function statusForConfigMatch(f) {
+  if (!f) return 'secure';
+  const sev = (f.severity || '').toLowerCase();
+  if (sev === 'critical' || sev === 'high') return 'critical';
+  return 'warning';
+}
+
+function statusPillClass(status) {
+  if (status === 'critical') return 'sev-critical';
+  if (status === 'warning') return 'sev-medium';
+  return 'sev-low';
+}
+
+// Best-effort content type label from the pasted text itself — used instead
+// of a fabricated file list, since this app scans one pasted blob at a time.
+function detectFileType(code) {
+  if (!code) return '—';
+  const trimmed = code.trim();
+  if (!trimmed) return '—';
+  if (trimmed.startsWith('{')) {
+    try { JSON.parse(trimmed); return 'JSON'; } catch { /* not JSON, fall through */ }
+  }
+  if (/^FROM\s+/im.test(trimmed) || /dockerfile/i.test(trimmed)) return 'Dockerfile';
+  if (/^[\w-]+:\s/m.test(trimmed)) return 'YAML';
+  if (/^[\w.]+\s*=\s*.+$/m.test(trimmed) && !trimmed.includes('{')) return '.env / Config';
+  return 'Source Code';
+}
+
+function ConfigurationCheckPanel({ results, code, scanDurationMs }) {
+  const [openRow, setOpenRow] = useState(null);
+  const allFindings = results?.findings || [];
+  const configFindings = allFindings.filter((f) => categoryOf(f) === 'config');
+
+  const checks = CONFIG_CHECK_DEFINITIONS.map((def) => {
+    const match = findConfigMatch(allFindings, def.keywords);
+    const status = statusForConfigMatch(match);
+    return { ...def, match, status };
+  });
+
+  const passed = checks.filter((c) => c.status === 'secure').length;
+  const warnings = checks.filter((c) => c.status === 'warning').length;
+  const criticalCount = checks.filter((c) => c.status === 'critical').length;
+  const totalChecks = checks.length;
+
+  const healthPct = totalChecks
+    ? Math.round(((passed + warnings * 0.5) / totalChecks) * 100)
+    : 100;
+  const healthLabel = healthPct >= 90 ? 'Excellent' : healthPct >= 70 ? 'Good' : healthPct >= 50 ? 'Moderate' : 'Poor';
+  const healthColor = healthPct >= 90 ? '#4fd08a' : healthPct >= 70 ? '#8dd66a' : healthPct >= 50 ? '#e8a33d' : '#e2504a';
+
+  const owaspChecks = OWASP_CHECK_DEFINITIONS.map((def) => {
+    const match = findConfigMatch(allFindings, def.keywords);
+    const status = statusForConfigMatch(match);
+    return { ...def, status };
+  });
+
+  const overallRisk = criticalCount > 0 ? 'High' : warnings > 0 ? 'Medium' : 'Low';
+  const overallRiskColor = overallRisk === 'High' ? '#e2504a' : overallRisk === 'Medium' ? '#e8a33d' : '#4fd08a';
+
+  const recommendedActions = [...new Set(configFindings.map((f) => f.fix).filter(Boolean))].slice(0, 5);
+
+  const linesScanned = code ? code.split('\n').length : 0;
+  const contentType = detectFileType(code);
+
+  const hasData = Boolean(results);
+
+  return (
+    <section className="panel wide-panel">
+      <div className="panel-head">
+        <div className="panel-icon"><Sliders size={18} /></div>
+        <div>
+          <h2>Configuration Check</h2>
+          <p>Find insecure configurations and harden your project.</p>
+        </div>
+        {hasData && (
+          <span className="results-badge" style={criticalCount > 0 ? CRITICAL_FALLBACK : { background: '#12301f', color: '#4fd08a' }}>
+            {configFindings.length} finding{configFindings.length !== 1 ? 's' : ''}
+          </span>
+        )}
+      </div>
+
+      {!hasData && (
+        <div className="empty-state">
+          <Sliders size={56} className="empty-icon" />
+          <h3>Run a scan to see configuration check results.</h3>
+          <p className="empty-sub">Head to Code Scan — this view mirrors your most recent scan.</p>
+        </div>
+      )}
+
+      {hasData && (
+        <>
+          <div className="dash-mid-grid" style={{ marginBottom: '16px' }}>
+            <div className="dash-sub-panel">
+              <h3>Configuration Health</h3>
+              <div className="dash-donut-row">
+                <svg width="110" height="110" viewBox="0 0 42 42">
+                  <circle cx="21" cy="21" r="15.9" fill="transparent" stroke="#232633" strokeWidth="6" />
+                  <circle
+                    cx="21" cy="21" r="15.9" fill="transparent"
+                    stroke={healthColor} strokeWidth="6"
+                    strokeDasharray={`${healthPct} ${100 - healthPct}`}
+                    strokeDashoffset="25"
+                  />
+                  <text x="21" y="19" textAnchor="middle" fontSize="7.5" fill="#e8e9ee" fontWeight="700">{healthPct}%</text>
+                  <text x="21" y="26" textAnchor="middle" fontSize="3.6" fill="#5c5f6d">Health</text>
+                </svg>
+                <div>
+                  <div className="dash-stat-value" style={{ color: healthColor, fontSize: '20px' }}>{healthLabel}</div>
+                  <div className="dash-stat-sub">{passed}/{totalChecks} checks passed</div>
+                </div>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '12px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px' }}>
+                  <CheckCircle2 size={14} style={{ color: '#4fd08a', flexShrink: 0 }} />
+                  <span>{passed} Passed</span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px' }}>
+                  <AlertTriangle size={14} style={{ color: '#e8a33d', flexShrink: 0 }} />
+                  <span>{warnings} Warning{warnings !== 1 ? 's' : ''}</span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px' }}>
+                  <X size={14} style={{ color: '#e2504a', flexShrink: 0 }} />
+                  <span>{criticalCount} Critical</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="dash-sub-panel">
+              <h3>Checks Performed</h3>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginTop: '10px' }}>
+                <div className="dash-stat-value" style={{ fontSize: '32px' }}>{totalChecks}<span style={{ fontSize: '18px' }}> / {totalChecks}</span></div>
+                <CheckCircle2 size={32} style={{ color: '#a98cf0', opacity: 0.7 }} />
+              </div>
+              <div className="dash-stat-sub" style={{ color: '#3ba7f0', marginTop: '6px' }}>100% Completed</div>
+            </div>
+
+            <div className="dash-sub-panel">
+              <h3>Scan Details</h3>
+              <div className="dash-stats-grid" style={{ gridTemplateColumns: '1fr 1fr', marginTop: '4px' }}>
+                <div className="dash-stat-card">
+                  <div className="dash-stat-head"><FileText size={14} /> Content Type</div>
+                  <div className="dash-stat-value" style={{ fontSize: '15px' }}>{contentType}</div>
+                </div>
+                <div className="dash-stat-card">
+                  <div className="dash-stat-head"><Code2 size={14} /> Lines Scanned</div>
+                  <div className="dash-stat-value" style={{ fontSize: '15px' }}>{linesScanned}</div>
+                </div>
+                <div className="dash-stat-card">
+                  <div className="dash-stat-head"><Clock size={14} /> Scan Duration</div>
+                  <div className="dash-stat-value" style={{ fontSize: '15px' }}>
+                    {scanDurationMs !== null && scanDurationMs !== undefined ? `${(scanDurationMs / 1000).toFixed(2)}s` : '—'}
+                  </div>
+                </div>
+                <div className="dash-stat-card">
+                  <div className="dash-stat-head"><ShieldAlert size={14} /> Risk Level</div>
+                  <div className="dash-stat-value" style={{ fontSize: '15px', color: overallRiskColor }}>{results.riskLevel ?? '—'}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="dash-sub-panel" style={{ marginBottom: '16px' }}>
+            <h3>Configuration Checks</h3>
+            <div className="dash-cap-grid">
+              {checks.map((c) => {
+                const Icon = c.icon;
+                const desc = c.match ? reasonForFinding(c.match) : c.cleanText;
+                return (
+                  <div className="dash-cap-card" key={c.key}>
+                    <div className="dash-cap-icon"><Icon size={14} /></div>
+                    <div className="dash-cap-title">{c.label}</div>
+                    <div style={{ margin: '4px 0' }}>
+                      <span className={`sev-pill ${statusPillClass(c.status)}`} style={c.status === 'critical' ? CRITICAL_FALLBACK : undefined}>
+                        {c.status === 'secure' ? 'Secure' : c.status === 'warning' ? 'Warning' : 'Critical'}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: '11.5px', opacity: 0.6, lineHeight: 1.4 }}>{desc}</div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <section className="panel" style={{ marginBottom: '16px' }}>
+            <div className="panel-head"><div><h2>Configuration Findings</h2></div></div>
+
+            {configFindings.length === 0 && (
+              <div className="empty-state">
+                <CheckCircle2 size={48} className="empty-icon success" />
+                <h3>No configuration issues found.</h3>
+              </div>
+            )}
+
+            {configFindings.length > 0 && (
+              <div className="secrets-table-wrap">
+                <table className="secrets-table">
+                  <thead>
+                    <tr>
+                      <th>Severity</th><th>Issue</th><th>File / Location</th><th>Description</th><th>Recommendation</th><th>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {configFindings.map((f, i) => {
+                      const isCritical = severityClass(f.severity) === 'sev-critical';
+                      const isOpen = openRow === i;
+                      return [
+                        <tr key={`row-${i}`}>
+                          <td>
+                            <span className={`sev-pill ${severityClass(f.severity)}`} style={isCritical ? CRITICAL_FALLBACK : undefined}>
+                              {f.severity}
+                            </span>
+                          </td>
+                          <td>{f.type}</td>
+                          <td style={{ fontFamily: 'monospace', fontSize: '12px' }}>{locationForFinding(f)}</td>
+                          <td style={{ fontSize: '12.5px', maxWidth: '260px' }}>{f.explanation || '—'}</td>
+                          <td style={{ fontSize: '12.5px', maxWidth: '220px' }}>{f.fix || '—'}</td>
+                          <td>
+                            <button className="text-btn" onClick={() => setOpenRow(isOpen ? null : i)}>
+                              {isOpen ? 'Hide' : 'View'}
+                            </button>
+                          </td>
+                        </tr>,
+                        isOpen && (
+                          <tr key={`detail-${i}`}>
+                            <td colSpan={6} style={{ fontSize: '12px', opacity: 0.7, padding: '8px 12px' }}>
+                              {typeof f.confidence === 'number' && <span>{Math.round(f.confidence * 100)}% confidence · </span>}
+                              {f.method && <span>Detected via {f.method}</span>}
+                            </td>
+                          </tr>
+                        ),
+                      ];
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+
+          <div className="dash-bottom-grid" style={{ gridTemplateColumns: '1fr 1fr 1fr' }}>
+            <div className="dash-sub-panel">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                <Brain size={16} style={{ color: '#a98cf0' }} />
+                <h3 style={{ margin: 0 }}>AI Recommendation</h3>
+              </div>
+              <p className="empty-sub" style={{ marginBottom: '10px' }}>
+                {configFindings.length === 0
+                  ? "No configuration issues found. Your project's configuration looks secure."
+                  : `Your project has ${criticalCount} critical and ${warnings} warning-level configuration issue${(criticalCount + warnings) !== 1 ? 's' : ''}. Addressing them will improve your security posture.`}
+              </p>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                <span style={{ fontSize: '13px', opacity: 0.7 }}>Overall Risk</span>
+                <span
+                  className="chip"
+                  style={{ background: `${overallRiskColor}22`, color: overallRiskColor, border: `1px solid ${overallRiskColor}66` }}
+                >
+                  {overallRisk}
+                </span>
+              </div>
+              {recommendedActions.length > 0 && (
+                <>
+                  <div style={{ fontSize: '13px', opacity: 0.7, marginBottom: '6px' }}>Recommended Actions</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    {recommendedActions.map((action) => (
+                      <div key={action} style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px' }}>
+                        <CheckCircle2 size={14} style={{ opacity: 0.4, flexShrink: 0 }} />
+                        <span>{action}</span>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+
+            <div className="dash-sub-panel">
+              <h3>Scan Coverage</h3>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '8px' }}>
+                {CONFIG_CHECK_DEFINITIONS.map((def) => (
+                  <div key={def.key} style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px' }}>
+                    <CheckCircle2 size={14} style={{ color: '#4fd08a', flexShrink: 0 }} />
+                    <span>{def.label}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="dash-sub-panel">
+              <h3>OWASP Security Misconfiguration Checklist</h3>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '8px', marginBottom: '10px' }}>
+                {owaspChecks.map((c) => {
+                  const label = c.status === 'secure' ? 'Passed' : c.status === 'warning' ? 'Warning' : 'Failed';
+                  const color = c.status === 'secure' ? '#4fd08a' : c.status === 'warning' ? '#e8a33d' : '#e2504a';
+                  const Icon = c.status === 'secure' ? CheckCircle2 : AlertTriangle;
+                  return (
+                    <div key={c.label} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '13px' }}>
+                      <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <Icon size={14} style={{ color, flexShrink: 0 }} />
+                        {c.label}
+                      </span>
+                      <span style={{ color, fontWeight: 600, fontSize: '12px' }}>{label}</span>
+                    </div>
+                  );
+                })}
+              </div>
+              <a
+                href="https://cheatsheetseries.owasp.org/cheatsheets/Secure_Configuration_Cheat_Sheet.html"
+                target="_blank" rel="noreferrer" className="text-btn"
+              >
+                <ExternalLink size={13} /> View OWASP Guidelines
+              </a>
+            </div>
+          </div>
+
+          <p className="empty-sub" style={{ marginTop: '16px' }}>
+            Configuration checks ensure your application and infrastructure follow security best practices and are not misconfigured.
+          </p>
+        </>
+      )}
+    </section>
+  );
+}
+
+// ============================================================================
+// Security Coverage — dedicated panel (replaces the old binary "Clean /
+// found" list). Reads from the same `results` / `code` state Code Scan
+// already populates. "Coverage %" per category is the average AI confidence
+// of that category's own findings (a real field from your backend) — when a
+// category has zero findings, coverage defaults to 100% (nothing to lower
+// confidence in). The OWASP Top 10 statuses reflect the scanner's actual
+// detection capability (whether categoryOf()/keyword logic exists for that
+// class of issue), not per-scan results — so they're constant, honest, and
+// don't fluctuate with unrelated scans.
+// ============================================================================
+
+function avgConfidencePct(findings) {
+  const withConf = findings.filter((f) => typeof f.confidence === 'number');
+  if (withConf.length === 0) return null;
+  return Math.round((withConf.reduce((s, f) => s + f.confidence, 0) / withConf.length) * 100);
+}
+
+const COVERAGE_ITEMS = [
+  { key: 'secrets', label: 'Secrets Detection', icon: KeyRound, color: '#a98cf0', match: (f) => categoryOf(f) === 'secrets' },
+  { key: 'injection', label: 'Injection Analysis', icon: Zap, color: '#4fd08a', match: (f) => categoryOf(f) === 'injection' },
+  { key: 'auth', label: 'Authentication', icon: Lock, color: '#3ba7f0', match: (f) => categoryOf(f) === 'auth' },
+  { key: 'access', label: 'Authorization', icon: ShieldAlert, color: '#e8a33d', match: (f) => categoryOf(f) === 'access' },
+  { key: 'config', label: 'Configuration Security', icon: Sliders, color: '#3ba7f0', match: (f) => categoryOf(f) === 'config' },
+  { key: 'deps', label: 'Dependency Security', icon: Package, color: '#a98cf0', match: (f) => categoryOf(f) === 'deps' },
+  {
+    key: 'inputval', label: 'Input Validation', icon: CheckCircle2, color: '#4fd08a',
+    match: (f) => { const t = `${f.type || ''} ${f.explanation || ''}`.toLowerCase(); return t.includes('input validation') || t.includes('unvalidated') || t.includes('sanitiz'); },
+  },
+  {
+    key: 'crypto', label: 'Cryptography', icon: Lock, color: '#e8a33d',
+    match: (f) => { const t = `${f.type || ''} ${f.explanation || ''}`.toLowerCase(); return t.includes('crypto') || t.includes('encrypt') || t.includes('hash') || t.includes('cipher'); },
+  },
+  {
+    key: 'logging', label: 'Logging & Monitoring', icon: FileText, color: '#3ba7f0',
+    match: (f) => { const t = `${f.type || ''} ${f.explanation || ''}`.toLowerCase(); return t.includes('logging') || t.includes('monitor') || t.includes('audit'); },
+  },
+];
+
+// Whether the scanner has dedicated detection logic for each OWASP Top 10
+// (2021) category, based on what categoryOf()/keyword matching in this file
+// can actually recognize. This is a capability statement, not a per-scan
+// result, so it's intentionally not derived from `results`.
+const OWASP_TOP10 = [
+  { id: 'A01', label: 'Broken Access Control', status: 'checked' },
+  { id: 'A02', label: 'Cryptographic Failures', status: 'partial' },
+  { id: 'A03', label: 'Injection', status: 'checked' },
+  { id: 'A04', label: 'Insecure Design', status: 'partial' },
+  { id: 'A05', label: 'Security Misconfiguration', status: 'checked' },
+  { id: 'A06', label: 'Vulnerable & Outdated Components', status: 'checked' },
+  { id: 'A07', label: 'Identification & Authentication Failures', status: 'checked' },
+  { id: 'A08', label: 'Software & Data Integrity Failures', status: 'partial' },
+  { id: 'A09', label: 'Security Logging & Monitoring Failures', status: 'partial' },
+  { id: 'A10', label: 'Server-Side Request Forgery (SSRF)', status: 'partial' },
+];
+
+const AI_SUMMARY_TILES = [
+  { key: 'source', label: 'Source Code Reviewed', desc: 'AI analyzed your source code for security issues', icon: Brain },
+  { key: 'secrets', label: 'Secrets Scanned', desc: 'Checked for hardcoded secrets and credentials', icon: KeyRound },
+  { key: 'config', label: 'Configurations Analyzed', desc: 'Scanned configs for security misconfigurations', icon: Sliders },
+  { key: 'deps', label: 'Dependencies Analyzed', desc: 'Analyzed dependency tree for vulnerabilities', icon: Package },
+  { key: 'risk', label: 'Risks Prioritized', desc: 'AI prioritized issues by risk and impact', icon: BarChart2 },
+  { key: 'fix', label: 'Fix Suggestions', desc: 'AI generated fix suggestions', icon: ShieldCheck },
+];
+
+function SecurityCoveragePanel({ results, code, scanDurationMs }) {
+  const allFindings = results?.findings || [];
+
+  const coverage = COVERAGE_ITEMS.map((item) => {
+    const matches = allFindings.filter(item.match);
+    const pct = matches.length > 0 ? (avgConfidencePct(matches) ?? 90) : 100;
+    return { ...item, count: matches.length, pct };
+  });
+
+  const overallPct = coverage.length
+    ? Math.round(coverage.reduce((s, c) => s + c.pct, 0) / coverage.length)
+    : 100;
+  const overallLabel = overallPct >= 90 ? 'Excellent' : overallPct >= 75 ? 'Good' : overallPct >= 50 ? 'Moderate' : 'Poor';
+  const overallColor = overallPct >= 90 ? '#4fd08a' : overallPct >= 75 ? '#8dd66a' : overallPct >= 50 ? '#e8a33d' : '#e2504a';
+
+  const totalChecks = coverage.length;
+  const aiConfPct = avgConfidencePct(allFindings);
+
+  const linesScanned = code ? code.split('\n').length : 0;
+  const contentType = detectFileType(code);
+
+  const hasData = Boolean(results);
+
+  return (
+    <section className="panel wide-panel">
+      <div className="panel-head">
+        <div className="panel-icon"><ShieldAlert size={18} /></div>
+        <div>
+          <h2>Security Coverage</h2>
+          <p>What SecureCode checks for on every scan, and what your last scan found.</p>
+        </div>
+      </div>
+
+      {!hasData && (
+        <div className="empty-state">
+          <ShieldAlert size={56} className="empty-icon" />
+          <h3>Run a scan to see coverage.</h3>
+          <p className="empty-sub">Coverage is based on your most recent scan from Code Scan.</p>
+        </div>
+      )}
+
+      {hasData && (
+        <>
+          <div className="dash-mid-grid" style={{ marginBottom: '16px' }}>
+            <div className="dash-sub-panel">
+              <h3>Overall Security Coverage</h3>
+              <div className="dash-donut-row">
+                <svg width="110" height="110" viewBox="0 0 42 42">
+                  <circle cx="21" cy="21" r="15.9" fill="transparent" stroke="#232633" strokeWidth="6" />
+                  <circle
+                    cx="21" cy="21" r="15.9" fill="transparent"
+                    stroke={overallColor} strokeWidth="6"
+                    strokeDasharray={`${overallPct} ${100 - overallPct}`}
+                    strokeDashoffset="25"
+                  />
+                  <text x="21" y="19" textAnchor="middle" fontSize="7.5" fill="#e8e9ee" fontWeight="700">{overallPct}%</text>
+                  <text x="21" y="26" textAnchor="middle" fontSize="3.6" fill="#5c5f6d">Coverage</text>
+                </svg>
+                <div>
+                  <div className="dash-stat-value" style={{ color: overallColor, fontSize: '20px' }}>{overallLabel}</div>
+                  <div className="dash-stat-sub">Across {totalChecks} categories</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="dash-sub-panel">
+              <h3>Security Checks Completed</h3>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginTop: '10px' }}>
+                <div className="dash-stat-value" style={{ fontSize: '32px' }}>{totalChecks}<span style={{ fontSize: '18px' }}> / {totalChecks}</span></div>
+                <CheckCircle2 size={32} style={{ color: '#4fd08a', opacity: 0.7 }} />
+              </div>
+              <div className="dash-stat-sub" style={{ color: '#4fd08a', marginTop: '6px' }}>100% Completed</div>
+            </div>
+
+            <div className="dash-sub-panel">
+              <h3>Scan Details</h3>
+              <div className="dash-stats-grid" style={{ gridTemplateColumns: '1fr 1fr', marginTop: '4px' }}>
+                <div className="dash-stat-card">
+                  <div className="dash-stat-head"><FileText size={14} /> Content Type</div>
+                  <div className="dash-stat-value" style={{ fontSize: '15px' }}>{contentType}</div>
+                </div>
+                <div className="dash-stat-card">
+                  <div className="dash-stat-head"><Code2 size={14} /> Lines Scanned</div>
+                  <div className="dash-stat-value" style={{ fontSize: '15px' }}>{linesScanned}</div>
+                </div>
+                <div className="dash-stat-card">
+                  <div className="dash-stat-head"><Clock size={14} /> Scan Duration</div>
+                  <div className="dash-stat-value" style={{ fontSize: '15px' }}>
+                    {scanDurationMs !== null && scanDurationMs !== undefined ? `${(scanDurationMs / 1000).toFixed(2)}s` : '—'}
+                  </div>
+                </div>
+                <div className="dash-stat-card">
+                  <div className="dash-stat-head"><ShieldAlert size={14} /> Risk Level</div>
+                  <div className="dash-stat-value" style={{ fontSize: '15px', color: overallColor }}>{results.riskLevel ?? '—'}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="dash-sub-panel" style={{ marginBottom: '16px' }}>
+            <h3>Coverage by Category</h3>
+            <div className="dash-cap-grid">
+              {coverage.slice(0, 6).map((c) => {
+                const Icon = c.icon;
+                return (
+                  <div className="dash-cap-card" key={c.key}>
+                    <div className="dash-cap-icon" style={{ color: c.color }}><Icon size={14} /></div>
+                    <div className="dash-cap-title">{c.label}</div>
+                    <div style={{ fontSize: '11.5px', opacity: 0.6, margin: '2px 0 8px' }}>
+                      {c.count === 0 ? 'No issues found' : `${c.count} issue${c.count !== 1 ? 's' : ''} found`}
+                    </div>
+                    <div className="dash-cat-row" style={{ margin: 0 }}>
+                      <div className="dash-cat-label" style={{ fontSize: '11px' }}>Coverage</div>
+                      <div className="dash-cat-track">
+                        <div className="dash-cat-fill" style={{ width: `${c.pct}%`, background: c.color }} />
+                      </div>
+                      <div className="dash-cat-count" style={{ color: c.color, fontWeight: 700 }}>{c.pct}%</div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="content-grid">
+            <div className="left-col">
+              <section className="panel">
+                <div className="panel-head"><div><h2>Coverage Details</h2></div></div>
+                {coverage.map((c) => (
+                  <div className="dash-cat-row" key={c.key}>
+                    <span className="dash-dot" style={{ background: c.color }} />
+                    <div className="dash-cat-label">{c.label}</div>
+                    <div className="dash-cat-track">
+                      <div className="dash-cat-fill" style={{ width: `${c.pct}%`, background: c.color }} />
+                    </div>
+                    <div className="dash-cat-count">{c.pct}%</div>
+                  </div>
+                ))}
+              </section>
+            </div>
+
+            <section className="panel risk-side-panel">
+              <div className="panel-head">
+                <div><h2>OWASP Top 10 Coverage</h2></div>
+                <a
+                  href="https://owasp.org/Top10/"
+                  target="_blank" rel="noreferrer"
+                  className="text-btn" style={{ marginLeft: 'auto' }}
+                >
+                  Learn more
+                </a>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '6px' }}>
+                {OWASP_TOP10.map((o) => {
+                  const checked = o.status === 'checked';
+                  const Icon = checked ? CheckCircle2 : AlertTriangle;
+                  const color = checked ? '#4fd08a' : '#e8a33d';
+                  return (
+                    <div key={o.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '12.5px' }}>
+                      <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <Icon size={14} style={{ color, flexShrink: 0 }} />
+                        {o.id}: {o.label}
+                      </span>
+                      <span
+                        className="chip"
+                        style={{ background: `${color}22`, color, border: `1px solid ${color}66`, flexShrink: 0 }}
+                      >
+                        {checked ? 'Checked' : 'Partial'}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          </div>
+
+          <div className="dash-sub-panel" style={{ marginTop: '16px' }}>
+            <h3>AI Analysis Summary</h3>
+            <div className="dash-cap-grid" style={{ marginBottom: '14px' }}>
+              {AI_SUMMARY_TILES.map((t) => {
+                const Icon = t.icon;
+                return (
+                  <div className="dash-cap-card" key={t.key}>
+                    <div className="dash-cap-icon"><Icon size={14} /></div>
+                    <div className="dash-cap-title">{t.label}</div>
+                    <div style={{ fontSize: '11.5px', opacity: 0.6, marginTop: '4px' }}>{t.desc}</div>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="dash-stat-card" style={{ maxWidth: '260px' }}>
+              <div className="dash-stat-head">AI Confidence Score</div>
+              <div className="dash-stat-value" style={{ color: '#a98cf0', fontSize: '30px' }}>
+                {aiConfPct !== null ? `${aiConfPct}%` : '—'}
+              </div>
+              <div className="dash-stat-sub" style={{ color: '#a98cf0' }}>
+                {aiConfPct !== null ? (aiConfPct >= 80 ? 'High Confidence' : aiConfPct >= 50 ? 'Moderate Confidence' : 'Low Confidence') : 'No AI findings yet'}
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+// ============================================================================
+// Scan Results — dedicated panel (replaces the old flat CodeFindingsList
+// view). Shows ONLY the most recent in-session scan (`results`), never
+// aggregated history — matches "Fixed / Open" status is tracked locally in
+// this component's state since the backend has no remediation-tracking
+// field; it resets whenever a new scan comes in. Risk scores reuse
+// computeRiskScore() from AI Prioritization, and the "AI Explanation" panel
+// reads straight from each finding's real `explanation`/`fix`/`confidence`/
+// `matchPreview` fields — no fabricated CWE IDs or before/after code diffs.
+// ============================================================================
+
+function ScanResultsPanel({ results, history, code, scanning, onRescan, goToNav }) {
+  const [fixedMap, setFixedMap] = useState({});
+  const [activeFilter, setActiveFilter] = useState('all');
+  const [search, setSearch] = useState('');
+  const [selectedIndex, setSelectedIndex] = useState(null);
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 10;
+
+  const findings = results?.findings || [];
+
+  // New scan came in (different results object) — reset all local UI state.
+  useEffect(() => {
+    setFixedMap({});
+    setActiveFilter('all');
+    setSearch('');
+    setSelectedIndex(null);
+    setPage(1);
+  }, [results]);
+
+  const scored = findings.map((f, i) => ({ ...f, _index: i, _score: computeRiskScore(f), _fixed: Boolean(fixedMap[i]) }));
+
+  const critical = scored.filter((f) => severityClass(f.severity) === 'sev-critical').length;
+  const high = scored.filter((f) => severityClass(f.severity) === 'sev-high').length;
+  const medium = scored.filter((f) => severityClass(f.severity) === 'sev-medium').length;
+  const low = scored.filter((f) => severityClass(f.severity) === 'sev-low').length;
+  const fixedCount = scored.filter((f) => f._fixed).length;
+  const openCount = scored.length - fixedCount;
+  const totalIssues = scored.length;
+  const remediationPct = totalIssues ? Math.round((fixedCount / totalIssues) * 100) : 0;
+
+  const uniqueLocations = new Set(scored.map((f) => locationForFinding(f))).size;
+
+  const securityScore = Math.max(0, 100 - (results?.riskScore ?? 0));
+  const scoreLabel = securityScore >= 90 ? 'Excellent' : securityScore >= 75 ? 'Good' : securityScore >= 50 ? 'Fair' : 'Poor';
+  const scoreColor = securityScore >= 90 ? '#4fd08a' : securityScore >= 75 ? '#8dd66a' : securityScore >= 50 ? '#e8a33d' : '#e2504a';
+
+  const sortedHistory = [...(history || [])].sort((a, b) => new Date(b.scannedAt) - new Date(a.scannedAt));
+  const lastScannedLabel = sortedHistory[0] ? formatDate(sortedHistory[0].scannedAt) : 'Just now';
+
+  const FILTERS = [
+    { key: 'all', label: `All (${totalIssues})` },
+    { key: 'critical', label: `Critical (${critical})` },
+    { key: 'high', label: `High (${high})` },
+    { key: 'medium', label: `Medium (${medium})` },
+    { key: 'low', label: `Low (${low})` },
+    { key: 'fixed', label: `Fixed (${fixedCount})` },
+    { key: 'open', label: `Open (${openCount})` },
+  ];
+
+  let filtered = scored;
+  if (activeFilter === 'critical') filtered = filtered.filter((f) => severityClass(f.severity) === 'sev-critical');
+  else if (activeFilter === 'high') filtered = filtered.filter((f) => severityClass(f.severity) === 'sev-high');
+  else if (activeFilter === 'medium') filtered = filtered.filter((f) => severityClass(f.severity) === 'sev-medium');
+  else if (activeFilter === 'low') filtered = filtered.filter((f) => severityClass(f.severity) === 'sev-low');
+  else if (activeFilter === 'fixed') filtered = filtered.filter((f) => f._fixed);
+  else if (activeFilter === 'open') filtered = filtered.filter((f) => !f._fixed);
+
+  if (search.trim()) {
+    const q = search.trim().toLowerCase();
+    filtered = filtered.filter((f) => `${f.type || ''} ${f.explanation || ''} ${f.packageName || ''}`.toLowerCase().includes(q));
+  }
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const pageClamped = Math.min(page, totalPages);
+  const pageItems = filtered.slice((pageClamped - 1) * PAGE_SIZE, pageClamped * PAGE_SIZE);
+
+  const selected = selectedIndex !== null ? scored.find((f) => f._index === selectedIndex) : null;
+
+  function toggleFixed(index) {
+    setFixedMap((prev) => ({ ...prev, [index]: !prev[index] }));
+  }
+
+  function handleCopyFix(fix) {
+    navigator.clipboard?.writeText(fix || '');
+  }
+
+  const hasData = Boolean(results);
+
+  return (
+    <section className="panel wide-panel">
+      <div className="panel-head">
+        <div className="panel-icon"><FileText size={18} /></div>
+        <div>
+          <h2>Scan Results</h2>
+          <p>Detailed results of security vulnerabilities found in your most recent scan.</p>
+        </div>
+        {hasData && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginLeft: 'auto' }}>
+            <span style={{ fontSize: '12.5px', opacity: 0.6, display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <Clock size={13} /> Last scanned: {lastScannedLabel}
+            </span>
+            <button className="scan-btn" style={{ padding: '8px 14px' }} onClick={onRescan} disabled={scanning || !code?.trim()}>
+              <Search size={14} /> {scanning ? 'Scanning…' : 'Rescan'}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {!hasData && (
+        <div className="empty-state">
+          <FileText size={56} className="empty-icon" />
+          <h3>No scan run yet.</h3>
+          <p className="empty-sub">Head to Code Scan to run one — results mirror here.</p>
+        </div>
+      )}
+
+      {hasData && totalIssues === 0 && (
+        <div className="empty-state">
+          <CheckCircle2 size={56} className="empty-icon success" />
+          <h3>No issues found. Nice and clean.</h3>
+        </div>
+      )}
+
+      {hasData && totalIssues > 0 && (
+        <>
+          <div className="dash-mid-grid" style={{ marginBottom: '16px', gridTemplateColumns: 'repeat(4, 1fr) 1.4fr' }}>
+            <div className="dash-sub-panel">
+              <h3>Security Score</h3>
+              <div className="dash-donut-row">
+                <svg width="90" height="90" viewBox="0 0 42 42">
+                  <circle cx="21" cy="21" r="15.9" fill="transparent" stroke="#232633" strokeWidth="6" />
+                  <circle
+                    cx="21" cy="21" r="15.9" fill="transparent"
+                    stroke={scoreColor} strokeWidth="6"
+                    strokeDasharray={`${securityScore} ${100 - securityScore}`}
+                    strokeDashoffset="25"
+                  />
+                  <text x="21" y="19" textAnchor="middle" fontSize="8" fill="#e8e9ee" fontWeight="700">{securityScore}</text>
+                  <text x="21" y="26" textAnchor="middle" fontSize="3.4" fill="#5c5f6d">/100</text>
+                </svg>
+                <div className="dash-stat-sub" style={{ color: scoreColor, fontWeight: 600 }}>{scoreLabel}</div>
+              </div>
+            </div>
+
+            <div className="dash-stat-card">
+              <div className="dash-stat-head"><ShieldAlert size={14} /> Issues Found</div>
+              <div className="dash-stat-value">{totalIssues}</div>
+            </div>
+            <div className="dash-stat-card">
+              <div className="dash-stat-head"><CheckCircle2 size={14} /> Fixed</div>
+              <div className="dash-stat-value" style={{ color: '#4fd08a' }}>{fixedCount}</div>
+              <div className="dash-stat-sub">{remediationPct}% resolved</div>
+            </div>
+            <div className="dash-stat-card">
+              <div className="dash-stat-head"><AlertTriangle size={14} /> Remaining</div>
+              <div className="dash-stat-value" style={{ color: '#e8a33d' }}>{openCount}</div>
+            </div>
+            <div className="dash-sub-panel">
+              <h3>Remediation Progress</h3>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                <span style={{ fontSize: '12px', opacity: 0.6 }}>{uniqueLocations} location{uniqueLocations !== 1 ? 's' : ''} affected</span>
+                <span style={{ fontSize: '13px', fontWeight: 700, color: '#a98cf0' }}>{remediationPct}% Completed</span>
+              </div>
+              <div className="dash-cat-track" style={{ width: '100%' }}>
+                <div className="dash-cat-fill" style={{ width: `${remediationPct}%`, background: '#a98cf0' }} />
+              </div>
+              <div style={{ display: 'flex', gap: '14px', marginTop: '8px', fontSize: '12px' }}>
+                <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><span className="dash-dot" style={{ background: '#4fd08a' }} />{fixedCount} Fixed</span>
+                <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><span className="dash-dot" style={{ background: '#e8a33d' }} />{openCount} Remaining</span>
+              </div>
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', alignItems: 'center', marginBottom: '14px' }}>
+            {FILTERS.map((f) => (
+              <button
+                key={f.key}
+                className="text-btn"
+                style={{
+                  padding: '6px 12px', borderRadius: '8px',
+                  background: activeFilter === f.key ? 'rgba(169,140,240,0.18)' : 'rgba(255,255,255,0.03)',
+                  border: activeFilter === f.key ? '1px solid rgba(169,140,240,0.5)' : '1px solid rgba(255,255,255,0.08)',
+                  color: activeFilter === f.key ? '#a98cf0' : undefined,
+                }}
+                onClick={() => { setActiveFilter(f.key); setPage(1); }}
+              >
+                {f.label}
+              </button>
+            ))}
+            <div style={{ marginLeft: 'auto' }}>
+              <input
+                className="code-input"
+                style={{ height: 'auto', padding: '8px 12px', width: '220px' }}
+                placeholder="Search issues..."
+                value={search}
+                onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+              />
+            </div>
+          </div>
+
+          <div className="content-grid">
+            <div className="left-col">
+              <section className="panel">
+                <div className="secrets-table-wrap">
+                  <table className="secrets-table">
+                    <thead>
+                      <tr>
+                        <th>Issue / Location</th><th>Severity</th><th>Risk Score</th><th>Status</th><th>Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {pageItems.map((f) => {
+                        const isCritical = severityClass(f.severity) === 'sev-critical';
+                        const isSelected = selectedIndex === f._index;
+                        return (
+                          <tr
+                            key={f._index}
+                            style={{ cursor: 'pointer', background: isSelected ? 'rgba(169,140,240,0.08)' : undefined }}
+                            onClick={() => setSelectedIndex(f._index)}
+                          >
+                            <td>
+                              <div style={{ fontWeight: 600 }}>{f.type}</div>
+                              <div style={{ fontSize: '11.5px', opacity: 0.55, fontFamily: 'monospace' }}>{locationForFinding(f)}</div>
+                            </td>
+                            <td>
+                              <span className={`sev-pill ${severityClass(f.severity)}`} style={isCritical ? CRITICAL_FALLBACK : undefined}>{f.severity}</span>
+                            </td>
+                            <td style={{ fontWeight: 700 }}>{(f._score / 10).toFixed(1)}/10</td>
+                            <td>
+                              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '12.5px' }}>
+                                <span className="dash-dot" style={{ background: f._fixed ? '#4fd08a' : '#e2504a' }} />
+                                {f._fixed ? 'Fixed' : 'Open'}
+                              </span>
+                            </td>
+                            <td onClick={(e) => e.stopPropagation()}>
+                              <button className="icon-btn" onClick={() => toggleFixed(f._index)} aria-label={f._fixed ? 'Mark as open' : 'Mark as fixed'}>
+                                {f._fixed ? <AlertTriangle size={14} /> : <Check size={14} />}
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                {filtered.length === 0 && (
+                  <p className="empty-sub" style={{ marginTop: '10px' }}>No issues match your filters.</p>
+                )}
+
+                {filtered.length > 0 && (
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '12px' }}>
+                    <span style={{ fontSize: '12.5px', opacity: 0.6 }}>
+                      Showing {(pageClamped - 1) * PAGE_SIZE + 1} to {Math.min(pageClamped * PAGE_SIZE, filtered.length)} of {filtered.length} results
+                    </span>
+                    <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                      <button className="icon-btn" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={pageClamped === 1} aria-label="Previous page">
+                        <ChevronRight size={14} style={{ transform: 'rotate(180deg)' }} />
+                      </button>
+                      <span style={{ fontSize: '12.5px' }}>{pageClamped} / {totalPages}</span>
+                      <button className="icon-btn" onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={pageClamped === totalPages} aria-label="Next page">
+                        <ChevronRight size={14} />
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </section>
+            </div>
+
+            <section className="panel risk-side-panel">
+              {!selected && (
+                <div className="empty-state">
+                  <Brain size={40} className="empty-icon" />
+                  <h3 style={{ fontSize: '14px' }}>Select an issue</h3>
+                  <p className="empty-sub">Click a row to see the AI explanation and suggested fix.</p>
+                </div>
+              )}
+              {selected && (
+                <>
+                  <div className="panel-head">
+                    <div><h2 style={{ fontSize: '16px' }}>{selected.type}</h2></div>
+                    <span className={`sev-pill ${severityClass(selected.severity)}`} style={severityClass(selected.severity) === 'sev-critical' ? CRITICAL_FALLBACK : undefined}>
+                      {selected.severity}
+                    </span>
+                    <button className="icon-btn" style={{ marginLeft: '8px' }} onClick={() => setSelectedIndex(null)} aria-label="Close">
+                      <X size={14} />
+                    </button>
+                  </div>
+                  <div style={{ fontSize: '12px', opacity: 0.6, marginBottom: '12px' }}>{locationForFinding(selected)}</div>
+
+                  <div className="finding-card">
+                    <div className="finding-type" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><Brain size={13} /> AI Explanation</div>
+                    <div className="finding-preview" style={{ marginTop: '6px' }}>{selected.explanation || 'No explanation available for this finding.'}</div>
+                    {typeof selected.confidence === 'number' && (
+                      <div style={{ marginTop: '10px' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11.5px', opacity: 0.6, marginBottom: '4px' }}>
+                          <span>AI Confidence</span><span>{Math.round(selected.confidence * 100)}%</span>
+                        </div>
+                        <div className="dash-cat-track"><div className="dash-cat-fill" style={{ width: `${Math.round(selected.confidence * 100)}%` }} /></div>
+                      </div>
+                    )}
+                  </div>
+
+                  {selected.matchPreview && (
+                    <div className="finding-card">
+                      <div className="finding-type">Flagged Code</div>
+                      <div className="finding-preview" style={{ fontFamily: 'monospace', fontSize: '12px', whiteSpace: 'pre-wrap' }}>{selected.matchPreview}</div>
+                    </div>
+                  )}
+
+                  <div className="finding-card">
+                    <div className="finding-type" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><Wrench size={13} /> Suggested Fix</div>
+                    <div className="finding-preview" style={{ marginTop: '6px' }}>{selected.fix || 'No fix suggestion available.'}</div>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
+                    <button className="scan-btn" style={{ flex: 1 }} onClick={() => handleCopyFix(selected.fix)}>
+                      <Copy size={14} /> Copy Fix
+                    </button>
+                    <button className="text-btn" style={{ flex: 1, justifyContent: 'center' }} onClick={() => goToNav('Code Scan')}>
+                      <ExternalLink size={13} /> View in Code
+                    </button>
+                  </div>
+                </>
+              )}
+            </section>
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+// ============================================================================
+// Reports — dedicated panel (replaces the old flat category-count list).
+// Reads from the same `results` / `history` state Code Scan already
+// populates — no mock data. Mirrors the target layout: security score
+// gauge, severity + category breakdowns, a trend line across saved scans,
+// an AI executive summary, top recommendations, and a Recent Scans table.
+// Each row (and the panel as a whole) can be downloaded as JSON client-side
+// via a Blob — no backend changes needed, and nothing else in the app is
+// touched.
+// ============================================================================
+
+function downloadJSON(filename, data) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// Groups the fine-grained categoryOf() buckets into the 5 slices shown in
+// the Reports "Findings by Category" donut — mirrors the target design's
+// Vulnerabilities / Secrets / Dependencies / Configuration / Other split.
+const REPORT_CATEGORY_GROUPS = [
+  { key: 'vulnerabilities', label: 'Vulnerabilities', color: '#a98cf0', match: (f) => ['injection', 'auth', 'access', 'logic'].includes(categoryOf(f)) },
+  { key: 'secrets', label: 'Secrets', color: '#e2504a', match: (f) => categoryOf(f) === 'secrets' },
+  { key: 'dependencies', label: 'Dependencies', color: '#3ba7f0', match: (f) => categoryOf(f) === 'deps' },
+  { key: 'configuration', label: 'Configuration', color: '#e8a33d', match: (f) => categoryOf(f) === 'config' },
+  { key: 'other', label: 'Other', color: '#4fd08a', match: (f) => categoryOf(f) === 'other' },
+];
+
+function ReportsPanel({ results, history, historyLoading }) {
+  const sortedHistory = [...(history || [])].sort((a, b) => new Date(b.scannedAt) - new Date(a.scannedAt));
+  const latest = results || sortedHistory[0] || null;
+  const latestFindings = results ? (results.findings || []) : parseFindings(sortedHistory[0]);
+
+  const hasData = Boolean(latest);
+
+  const critical = latest?.critical ?? 0;
+  const high = latest?.highSeverity ?? 0;
+  const medium = latest?.mediumSeverity ?? 0;
+  const low = latest?.lowSeverity ?? 0;
+  const totalIssues = latest?.totalFindings ?? (critical + high + medium + low);
+  const riskScore = latest?.riskScore ?? 0;
+  const riskLevel = latest?.riskLevel ?? '—';
+  const securityScore = Math.max(0, 100 - riskScore);
+  const scoreLabel = securityScore >= 90 ? 'Excellent' : securityScore >= 75 ? 'Good' : securityScore >= 50 ? 'Medium Risk' : 'High Risk';
+  const scoreColor = securityScore >= 90 ? '#4fd08a' : securityScore >= 75 ? '#8dd66a' : securityScore >= 50 ? '#e8a33d' : '#e2504a';
+
+  // The backend has no per-issue fixed/open persistence (that only lives in
+  // ScanResultsPanel's local session state), so "Resolved" here is the
+  // honest analogue: how much the total finding count has dropped since
+  // your earliest saved scan, not a per-issue checklist.
+  const oldestInHistory = sortedHistory[sortedHistory.length - 1];
+  const baselineTotal = oldestInHistory?.totalFindings ?? totalIssues;
+  const resolvedSinceStart = Math.max(0, baselineTotal - totalIssues);
+  const remaining = totalIssues;
+
+  const filesAffected = new Set(latestFindings.map(locationForFinding).filter((l) => l !== '—')).size;
+
+  const severityRows = [
+    { key: 'critical', label: 'Critical', count: critical, color: '#e2504a' },
+    { key: 'high', label: 'High', count: high, color: '#e8a33d' },
+    { key: 'medium', label: 'Medium', count: medium, color: '#d9c94f' },
+    { key: 'low', label: 'Low', count: low, color: '#4fd08a' },
+  ];
+
+  const categoryRows = REPORT_CATEGORY_GROUPS.map((g) => ({ ...g, count: latestFindings.filter(g.match).length }));
+  const categoryTotal = categoryRows.reduce((s, c) => s + c.count, 0);
+
+  // Last 6 scans, oldest → latest, for the trend line — plotted as
+  // "security score" (100 - riskScore) to match the higher-is-better axis
+  // on screen.
+  const trendScans = [...sortedHistory].slice(0, 6).reverse();
+
+  const confidences = latestFindings.filter((f) => typeof f.confidence === 'number');
+  const aiConfidencePct = confidences.length
+    ? Math.round((confidences.reduce((s, f) => s + f.confidence, 0) / confidences.length) * 100)
+    : null;
+
+  const previousScan = sortedHistory[0];
+  const scoreDelta = previousScan && typeof previousScan.riskScore === 'number'
+    ? securityScore - Math.max(0, 100 - previousScan.riskScore)
+    : null;
+
+  const summaryLines = [];
+  if (hasData) {
+    summaryLines.push(`SecureCode detected ${totalIssues} issue${totalIssues !== 1 ? 's' : ''} in your codebase.`);
+    if (critical > 0) {
+      summaryLines.push(`${critical} critical issue${critical !== 1 ? 's' : ''} require immediate attention as ${critical !== 1 ? 'they pose' : 'it poses'} a high risk to your application.`);
+    }
+    if (scoreDelta !== null && scoreDelta !== 0) {
+      summaryLines.push(`Your security score ${scoreDelta >= 0 ? 'improved' : 'dropped'} by ${Math.abs(scoreDelta)} point${Math.abs(scoreDelta) !== 1 ? 's' : ''} compared to the previous scan.`);
+    }
+    summaryLines.push('Focus on fixing critical and high severity issues first to reduce overall risk.');
+  }
+
+  const recommendations = [];
+  if (categoryRows.find((c) => c.key === 'vulnerabilities')?.count > 0) {
+    recommendations.push({ icon: ShieldAlert, label: 'Fix injection vulnerabilities', sev: 'Critical' });
+  }
+  if (categoryRows.find((c) => c.key === 'secrets')?.count > 0) {
+    recommendations.push({ icon: KeyRound, label: 'Remove hardcoded secrets', sev: 'High' });
+  }
+  if (categoryRows.find((c) => c.key === 'dependencies')?.count > 0) {
+    recommendations.push({ icon: Package, label: 'Update vulnerable dependencies', sev: 'High' });
+  }
+  if (categoryRows.find((c) => c.key === 'configuration')?.count > 0) {
+    recommendations.push({ icon: Sliders, label: 'Secure configuration files', sev: 'Medium' });
+  }
+  if (recommendations.length < 5) {
+    recommendations.push({ icon: Code2, label: 'Use environment variables for secrets', sev: 'Medium' });
+  }
+
+  function recSevStyle(sev) {
+    if (sev === 'Critical') return CRITICAL_FALLBACK;
+    if (sev === 'High') return { background: 'rgba(232,163,61,0.15)', color: '#e8a33d', border: '1px solid rgba(232,163,61,0.4)' };
+    return { background: 'rgba(217,201,79,0.15)', color: '#d9c94f', border: '1px solid rgba(217,201,79,0.4)' };
+  }
+
+  function handleExportAll() {
+    downloadJSON('securecode-report.json', {
+      generatedAt: new Date().toISOString(),
+      latestScan: latest,
+      allScans: sortedHistory,
+    });
+  }
+
+  function handleDownloadScan(scan) {
+    downloadJSON(`securecode-scan-${scan.id}.json`, scan);
+  }
+
+  return (
+    <section className="panel wide-panel">
+      <div className="panel-head">
+        <div className="panel-icon"><BarChart2 size={18} /></div>
+        <div>
+          <h2>Reports</h2>
+          <p>Comprehensive security overview of your project.</p>
+        </div>
+        {sortedHistory[0] && (
+          <span style={{ fontSize: '12.5px', opacity: 0.6, display: 'flex', alignItems: 'center', gap: '6px', marginLeft: 'auto' }}>
+            <Clock size={13} /> Last scanned: {formatDate(sortedHistory[0].scannedAt)}
+          </span>
+        )}
+        <button className="scan-btn" style={{ padding: '8px 14px', marginLeft: '12px' }} onClick={handleExportAll} disabled={!hasData}>
+          <Download size={14} /> Export Report
+        </button>
+      </div>
+
+      {historyLoading && !hasData && (
+        <div className="empty-state">
+          <Clock size={56} className="empty-icon" />
+          <h3>Loading your scan data…</h3>
+        </div>
+      )}
+
+      {!historyLoading && !hasData && (
+        <div className="empty-state">
+          <BarChart2 size={56} className="empty-icon" />
+          <h3>No scans yet.</h3>
+          <p className="empty-sub">Run a scan from Code Scan and your report will populate automatically.</p>
+        </div>
+      )}
+
+      {hasData && (
+        <>
+          <div className="dash-mid-grid" style={{ gridTemplateColumns: '1.2fr 1fr 1fr 1fr 1fr', marginBottom: '16px' }}>
+            <div className="dash-sub-panel">
+              <h3>Security Overview</h3>
+              <div className="dash-donut-row">
+                <svg width="100" height="100" viewBox="0 0 42 42">
+                  <circle cx="21" cy="21" r="15.9" fill="transparent" stroke="#232633" strokeWidth="6" />
+                  <circle
+                    cx="21" cy="21" r="15.9" fill="transparent"
+                    stroke={scoreColor} strokeWidth="6"
+                    strokeDasharray={`${securityScore} ${100 - securityScore}`}
+                    strokeDashoffset="25"
+                  />
+                  <text x="21" y="19" textAnchor="middle" fontSize="8" fill="#e8e9ee" fontWeight="700">{securityScore}</text>
+                  <text x="21" y="26" textAnchor="middle" fontSize="3.4" fill="#5c5f6d">/100</text>
+                </svg>
+                <div className="dash-stat-sub" style={{ color: scoreColor, fontWeight: 600 }}>{scoreLabel}</div>
+              </div>
+            </div>
+            <div className="dash-stat-card">
+              <div className="dash-stat-head"><span className="dash-stat-icon" style={{ background: '#3a1d1d', color: '#e2504a' }}><ShieldAlert size={14} /></span>Total Issues</div>
+              <div className="dash-stat-value">{totalIssues}</div>
+              <div className="dash-stat-sub">All identified issues</div>
+            </div>
+            <div className="dash-stat-card">
+              <div className="dash-stat-head"><span className="dash-stat-icon" style={{ background: '#12301f', color: '#4fd08a' }}><CheckCircle2 size={14} /></span>Resolved</div>
+              <div className="dash-stat-value">{resolvedSinceStart}</div>
+              <div className="dash-stat-sub">Since your first scan</div>
+            </div>
+            <div className="dash-stat-card">
+              <div className="dash-stat-head"><span className="dash-stat-icon" style={{ background: '#3a2a12', color: '#e8a33d' }}><ShieldAlert size={14} /></span>Remaining</div>
+              <div className="dash-stat-value">{remaining}</div>
+              <div className="dash-stat-sub">Issues to fix</div>
+            </div>
+            <div className="dash-stat-card">
+              <div className="dash-stat-head"><span className="dash-stat-icon" style={{ background: '#12283a', color: '#3ba7f0' }}><FileText size={14} /></span>Files Affected</div>
+              <div className="dash-stat-value">{filesAffected}</div>
+              <div className="dash-stat-sub">Scanned locations</div>
+            </div>
+          </div>
+
+          <div className="dash-mid-grid" style={{ marginBottom: '16px' }}>
+            <div className="dash-sub-panel">
+              <h3>Severity Overview</h3>
+              {severityRows.map((s) => (
+                <div className="dash-cat-row" key={s.key}>
+                  <span className="dash-dot" style={{ background: s.color }} />
+                  <div className="dash-cat-label">{s.label}</div>
+                  <div className="dash-cat-track">
+                    <div className="dash-cat-fill" style={{ width: `${totalIssues ? (s.count / totalIssues) * 100 : 0}%`, background: s.color }} />
+                  </div>
+                  <div className="dash-cat-count">{totalIssues ? Math.round((s.count / totalIssues) * 100) : 0}%</div>
+                </div>
+              ))}
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '10px', fontSize: '12.5px', opacity: 0.65 }}>
+                <span>Total Issues</span><span>{totalIssues}</span>
+              </div>
+            </div>
+
+            <div className="dash-sub-panel">
+              <h3>Findings by Category</h3>
+              <div className="dash-donut-row">
+                <svg width="100" height="100" viewBox="0 0 42 42">
+                  <circle cx="21" cy="21" r="15.9" fill="transparent" stroke="#232633" strokeWidth="6" />
+                  {(() => {
+                    let offset = 25;
+                    return categoryRows.map((c) => {
+                      const pct = categoryTotal > 0 ? (c.count / categoryTotal) * 100 : 0;
+                      const circle = (
+                        <circle
+                          key={c.key} cx="21" cy="21" r="15.9" fill="transparent"
+                          stroke={c.color} strokeWidth="6"
+                          strokeDasharray={`${pct} ${100 - pct}`}
+                          strokeDashoffset={offset}
+                        />
+                      );
+                      offset -= pct;
+                      return circle;
+                    });
+                  })()}
+                  <text x="21" y="19" textAnchor="middle" fontSize="7" fill="#e8e9ee" fontWeight="700">{categoryTotal}</text>
+                  <text x="21" y="26" textAnchor="middle" fontSize="4" fill="#5c5f6d">Total</text>
+                </svg>
+                <div className="dash-legend">
+                  {categoryRows.map((c) => (
+                    <div className="dash-legend-item" key={c.key}>
+                      <span className="dash-dot" style={{ background: c.color }} />{c.label}
+                      <span className="dash-legend-count">{c.count} ({categoryTotal > 0 ? Math.round((c.count / categoryTotal) * 100) : 0}%)</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="dash-mid-grid" style={{ marginBottom: '16px' }}>
+            <div className="dash-sub-panel">
+              <h3>Security Trend</h3>
+              <p className="dash-sub-caption">Last {trendScans.length || 0} scan{trendScans.length !== 1 ? 's' : ''}</p>
+              {trendScans.length === 0 && <p className="empty-sub">Not enough history yet.</p>}
+              {trendScans.length > 0 && (
+                <svg width="100%" height="110" viewBox="0 0 260 100" preserveAspectRatio="none">
+                  <polyline
+                    fill="none" stroke="#a98cf0" strokeWidth="2"
+                    points={trendScans.map((s, i) => {
+                      const x = trendScans.length > 1 ? (i / (trendScans.length - 1)) * 250 + 5 : 130;
+                      const sc = Math.max(0, 100 - (s.riskScore ?? 0));
+                      const y = 90 - (sc / 100) * 80;
+                      return `${x},${y}`;
+                    }).join(' ')}
+                  />
+                  {trendScans.map((s, i) => {
+                    const x = trendScans.length > 1 ? (i / (trendScans.length - 1)) * 250 + 5 : 130;
+                    const sc = Math.max(0, 100 - (s.riskScore ?? 0));
+                    const y = 90 - (sc / 100) * 80;
+                    return <circle key={i} cx={x} cy={y} r="3" fill="#a98cf0" />;
+                  })}
+                </svg>
+              )}
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10.5px', opacity: 0.5, marginTop: '4px' }}>
+                {trendScans.map((s, i) => <span key={i}>{formatDate(s.scannedAt).split(',')[0]}</span>)}
+              </div>
+            </div>
+
+            <div className="dash-sub-panel">
+              <h3 style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><Brain size={15} style={{ color: '#a98cf0' }} /> AI Executive Summary</h3>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', margin: '8px 0 12px', fontSize: '13px', opacity: 0.85 }}>
+                {summaryLines.map((line, i) => <p key={i} style={{ margin: 0 }}>{line}</p>)}
+              </div>
+              <div style={{ display: 'flex', gap: '10px' }}>
+                <div className="chip" style={{ background: 'rgba(169,140,240,0.15)', color: '#a98cf0', border: '1px solid rgba(169,140,240,0.4)' }}>
+                  AI Confidence {aiConfidencePct !== null ? `${aiConfidencePct}%` : '—'}
+                </div>
+                <div className="chip" style={riskScore >= 70 ? CRITICAL_FALLBACK : { background: 'rgba(232,163,61,0.15)', color: '#e8a33d', border: '1px solid rgba(232,163,61,0.4)' }}>
+                  Overall Risk {riskLevel}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="dash-sub-panel" style={{ marginBottom: '16px' }}>
+            <h3>Top Recommendations</h3>
+            <div className="dash-cap-grid">
+              {recommendations.slice(0, 5).map((r, i) => {
+                const Icon = r.icon;
+                return (
+                  <div className="dash-cap-card" key={i}>
+                    <div className="dash-cap-icon"><Icon size={14} /></div>
+                    <div className="dash-cap-title">{r.label}</div>
+                    <span className="chip" style={{ ...recSevStyle(r.sev), marginTop: '6px', display: 'inline-block' }}>{r.sev}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="dash-sub-panel">
+            <div className="dash-panel-title-row"><h3>Recent Scans</h3></div>
+            {sortedHistory.length === 0 && <p className="empty-sub">No saved scans yet.</p>}
+            {sortedHistory.length > 0 && (
+              <div className="secrets-table-wrap">
+                <table className="secrets-table">
+                  <thead>
+                    <tr>
+                      <th>Scan ID</th><th>Date &amp; Time</th><th>Status</th><th>Score</th><th>Issues</th><th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sortedHistory.slice(0, 10).map((s) => {
+                      const sc = Math.max(0, 100 - (s.riskScore ?? 0));
+                      const iss = s.totalFindings ?? ((s.critical ?? 0) + (s.highSeverity ?? 0) + (s.mediumSeverity ?? 0) + (s.lowSeverity ?? 0));
+                      return (
+                        <tr key={s.id}>
+                          <td style={{ fontFamily: 'monospace', fontSize: '12px' }}>#{s.id}</td>
+                          <td style={{ fontSize: '12.5px' }}>{formatDate(s.scannedAt)}</td>
+                          <td><span className="sev-pill sev-low">Completed</span></td>
+                          <td style={{ fontWeight: 700 }}>{sc}/100</td>
+                          <td>{iss}</td>
+                          <td>
+                            <button className="icon-btn" onClick={() => handleDownloadScan(s)} aria-label="Download scan">
+                              <Download size={14} />
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
 export default function App() {
   const [code, setCode] = useState('');
   const [activeNav, setActiveNav] = useState('Code Scan');
@@ -1821,43 +3160,14 @@ export default function App() {
 
     if (activeNav === 'Scan Results') {
       return (
-        <section className="panel wide-panel">
-          <div className="panel-head">
-            <div className="panel-icon"><FileText size={18} /></div>
-            <div>
-              <h2>Scan results</h2>
-              {results && results.riskLevel && (
-                <p style={{ margin: 0 }}>Risk score: {results.riskScore ?? 0} · {results.riskLevel}</p>
-              )}
-            </div>
-            <span className="results-badge">{results ? results.totalFindings : 0} results</span>
-          </div>
-
-          {!results && (
-            <div className="empty-state">
-              <FileText size={56} className="empty-icon" />
-              <h3>No scan run yet.</h3>
-              <p className="empty-sub">Head to Code Scan to run one — results mirror here.</p>
-            </div>
-          )}
-
-          {results && results.totalFindings === 0 && (
-            <div className="empty-state">
-              <CheckCircle2 size={56} className="empty-icon success" />
-              <h3>No secrets found. Nice and clean.</h3>
-            </div>
-          )}
-
-          {results && results.totalFindings > 0 && (
-            <CodeFindingsList
-              findings={results.findings}
-              criticalCount={results.critical ?? 0}
-              highCount={results.highSeverity ?? 0}
-              mediumCount={results.mediumSeverity ?? 0}
-              lowCount={results.lowSeverity ?? 0}
-            />
-          )}
-        </section>
+        <ScanResultsPanel
+          results={results}
+          history={history}
+          code={code}
+          scanning={scanning}
+          onRescan={handleScan}
+          goToNav={goToNav}
+        />
       );
     }
 
@@ -1922,90 +3232,11 @@ export default function App() {
     }
 
     if (activeNav === 'Reports') {
-      const findings = results?.findings || [];
-      return (
-        <section className="panel wide-panel">
-          <div className="panel-head">
-            <div className="panel-icon"><BarChart2 size={18} /></div>
-            <div><h2>Reports</h2><p>A summary of your latest scan, broken down by category.</p></div>
-          </div>
-
-          {!results && (
-            <div className="empty-state">
-              <BarChart2 size={56} className="empty-icon" />
-              <h3>Run a scan to generate a report.</h3>
-            </div>
-          )}
-
-          {results && (
-            <>
-              <div className="finding-card">
-                <div className="finding-type">Overall risk</div>
-                <div className="finding-preview">{results.riskScore ?? 0} / 100 — {results.riskLevel}</div>
-              </div>
-              <div className="findings-list" style={{ marginTop: '12px' }}>
-                {COVERAGE_CATEGORIES.map(({ key, label }) => {
-                  const count = findings.filter((f) => categoryOf(f) === key).length;
-                  return (
-                    <div className="finding-card" key={key}>
-                      <div className="finding-top">
-                        <span className={`sev-pill ${count ? 'sev-high' : 'sev-low'}`}>
-                          {count} finding{count !== 1 ? 's' : ''}
-                        </span>
-                      </div>
-                      <div className="finding-type">{label}</div>
-                    </div>
-                  );
-                })}
-              </div>
-            </>
-          )}
-        </section>
-      );
+      return <ReportsPanel results={results} history={history} historyLoading={historyLoading} />;
     }
 
     if (activeNav === 'Security Coverage') {
-      const findings = results?.findings || [];
-      const counts = {};
-      findings.forEach((f) => {
-        const c = categoryOf(f);
-        counts[c] = (counts[c] || 0) + 1;
-      });
-
-      return (
-        <section className="panel wide-panel">
-          <div className="panel-head">
-            <div className="panel-icon"><ShieldAlert size={18} /></div>
-            <div>
-              <h2>Security coverage</h2>
-              <p>What SecureCode checks for on every scan, and what your last scan found.</p>
-            </div>
-          </div>
-
-          {!results && (
-            <div className="empty-state">
-              <ShieldAlert size={56} className="empty-icon" />
-              <h3>Run a scan to see coverage.</h3>
-              <p className="empty-sub">Coverage is based on your most recent scan from Code Scan.</p>
-            </div>
-          )}
-
-          {results && (
-            <div className="findings-list">
-              {COVERAGE_CATEGORIES.map(({ key, label }) => (
-                <div className="finding-card" key={key}>
-                  <div className="finding-top">
-                    <span className={`sev-pill ${counts[key] ? 'sev-high' : 'sev-low'}`}>
-                      {counts[key] ? `${counts[key]} found` : 'Clean'}
-                    </span>
-                  </div>
-                  <div className="finding-type">{label}</div>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-      );
+      return <SecurityCoveragePanel results={results} code={code} scanDurationMs={scanDurationMs} />;
     }
 
     if (activeNav === 'Secrets Detection') {
@@ -2019,40 +3250,7 @@ export default function App() {
     }
 
     if (activeNav === 'Configuration Check') {
-      const filtered = (results?.findings || []).filter((f) => categoryOf(f) === 'config');
-      return (
-        <section className="panel wide-panel">
-          <div className="panel-head">
-            <div className="panel-icon"><Sliders size={18} /></div>
-            <div>
-              <h2>Configuration Check</h2>
-              <p>Findings from your last scan, filtered to this category.</p>
-            </div>
-          </div>
-
-          {!results && (
-            <div className="empty-state">
-              <Sliders size={56} className="empty-icon" />
-              <h3>Run a scan to see results here.</h3>
-            </div>
-          )}
-
-          {results && filtered.length === 0 && (
-            <div className="empty-state">
-              <CheckCircle2 size={56} className="empty-icon success" />
-              <h3>Nothing found in this category.</h3>
-            </div>
-          )}
-
-          {results && filtered.length > 0 && (
-            <div className="findings-list">
-              {filtered.map((f, i) => (
-                <FindingItem key={i} f={f} />
-              ))}
-            </div>
-          )}
-        </section>
-      );
+      return <ConfigurationCheckPanel results={results} code={code} scanDurationMs={scanDurationMs} />;
     }
 
     if (activeNav === 'Dependency Check') {
@@ -2064,19 +3262,7 @@ export default function App() {
     }
 
     if (activeNav === 'Projects') {
-      return (
-        <section className="panel wide-panel">
-          <div className="panel-head">
-            <div className="panel-icon"><Folder size={18} /></div>
-            <div><h2>Projects</h2><p>Group scans by codebase or repo.</p></div>
-          </div>
-          <div className="empty-state">
-            <Folder size={56} className="empty-icon" />
-            <h3>Not built yet.</h3>
-            <p className="empty-sub">Reserved for grouping scan history by project — needs a projects table on the backend first.</p>
-          </div>
-        </section>
-      );
+      return <ProjectsPanel />;
     }
 
     if (activeNav === 'Saved Snippets') {

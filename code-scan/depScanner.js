@@ -23,16 +23,27 @@ function parsePackageJson(content) {
 }
 
 function severityFromOSV(vuln) {
-  const sev = vuln?.severity?.[0]?.score;
-  if (!sev) return "Medium";
-  const score = parseFloat(sev);
-  if (!isNaN(score)) {
-    if (score >= 9) return "Critical";
-    if (score >= 7) return "High";
-    if (score >= 4) return "Medium";
-    return "Low";
+  // Try CVSS-based severity first (score out of 10)
+  const cvssScore = vuln?.severity?.[0]?.score;
+  if (cvssScore) {
+    const score = parseFloat(cvssScore);
+    if (!isNaN(score)) {
+      if (score >= 9) return "Critical";
+      if (score >= 7) return "High";
+      if (score >= 4) return "Medium";
+      return "Low";
+    }
   }
-  return "Medium";
+
+  // Fall back to GitHub Security Advisory's own severity label — most
+  // npm/GHSA entries report severity this way instead of via CVSS vectors.
+  const ghsaSeverity = vuln?.database_specific?.severity;
+  if (ghsaSeverity) {
+    const map = { CRITICAL: "Critical", HIGH: "High", MODERATE: "Medium", LOW: "Low" };
+    if (map[ghsaSeverity]) return map[ghsaSeverity];
+  }
+
+  return "Medium"; // genuine unknown — reasonable default
 }
 
 // Pulls the first "fixed" version out of an OSV vuln's affected/ranges/events

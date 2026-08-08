@@ -19,18 +19,28 @@
 }
 
 html, body, #root { min-height: 100%; }
+/* Lock the browser window itself from scrolling — the sidebar and main
+   panel below each get their own independent scroll area instead. */
+html, body { height: 100%; overflow: hidden; }
 #root { max-width: none; margin: 0; padding: 0; text-align: left; width: 100%; }
 body { margin: 0; background: var(--bg); color: var(--text); font-family: 'Inter', system-ui, sans-serif; }
 h1, h2, h3, p, span, div, li, a, button { color: inherit; }
 a { color: #7ec3f5; }
 
-.app { display: flex; width: 100%; background: var(--bg); color: var(--text); }
+.app {
+  display: flex; width: 100%; background: var(--bg); color: var(--text);
+  height: 100vh;
+  overflow: hidden;
+}
 
 /* Sidebar */
 .sidebar {
   width: 260px; flex-shrink: 0; background: var(--panel);
   border-right: 1px solid var(--border); padding: 20px 16px;
   display: flex; flex-direction: column;
+  height: 100vh;
+  overflow-y: auto;
+  min-height: 0;
 }
 .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 24px; position: relative; }
 .sidebar-close { display: none; }
@@ -59,8 +69,39 @@ a { color: #7ec3f5; }
 
 .sidebar-footer { font-size: 11px; color: var(--text-faint); line-height: 1.6; }
 
+/* Thin, subtle scrollbars for the two independently-scrolling regions —
+   matches the existing .results-panel scrollbar treatment so the dark
+   theme stays consistent. */
+.sidebar,
+.main {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+}
+.sidebar::-webkit-scrollbar,
+.main::-webkit-scrollbar {
+  width: 6px;
+}
+.sidebar::-webkit-scrollbar-track,
+.main::-webkit-scrollbar-track {
+  background: transparent;
+}
+.sidebar::-webkit-scrollbar-thumb,
+.main::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 3px;
+}
+.sidebar::-webkit-scrollbar-thumb:hover,
+.main::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
 /* Main */
-.main { flex: 1; padding: 18px 28px; display: flex; flex-direction: column; }
+.main {
+  flex: 1; padding: 18px 28px; display: flex; flex-direction: column;
+  height: 100vh;
+  overflow-y: auto;
+  min-height: 0;
+}
 
 .menu-btn { display: none; background: var(--panel-2); border: 1px solid var(--border); color: var(--text); width: 36px; height: 36px; border-radius: 8px; align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0; }
 
@@ -74,7 +115,7 @@ a { color: #7ec3f5; }
 .ghost-btn { display: flex; align-items: center; gap: 6px; background: var(--panel-2); border: 1px solid var(--border); color: var(--text); padding: 8px 14px; border-radius: 8px; font-size: 13px; cursor: pointer; }
 .icon-btn { width: 34px; height: 34px; border-radius: 50%; background: var(--panel-2); border: 1px solid var(--border); color: var(--text); display: flex; align-items: center; justify-content: center; cursor: pointer; }
 
-.content-grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; align-items: stretch; flex: 1; min-height: 0; }
+.content-grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; align-items: stretch; flex: 1; min-height: auto; }
 .left-col { display: flex; flex-direction: column; gap: 12px; }
 
 /* Make every panel inside a content-grid row actually fill the stretched
@@ -86,7 +127,7 @@ a { color: #7ec3f5; }
   display: flex;
   flex-direction: column;
   height: 100%;
-  min-height: 0;
+  min-height: auto;
 }
 
 /* Let the textarea (not the buttons/chips around it) absorb the extra
