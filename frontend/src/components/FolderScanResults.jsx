@@ -23,7 +23,7 @@ const SEVERITY_BG = {
   Info: 'rgba(167, 139, 250, 0.15)',
 };
 
-const API_URL = 'http://localhost:4000';
+const API_URL = 'https://remidix-backend.onrender.com';
 
 function formatDate(dateStr) {
   if (!dateStr) return 'Never';
