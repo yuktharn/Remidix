@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { GitBranch, LogOut, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
 
-const API_URL = 'http://localhost:4000';
+const API_URL = 'https://remidix-backend.onrender.com';
 
 export default function GitHubLogin({ onAuthChange }) {
   const [user, setUser] = useState(null);
