@@ -1,4 +1,4 @@
-const BASE = 'http://localhost:4000';
+const BASE = 'https://remidix-backend.onrender.com';
 
 async function test() {
   console.log('=== AI ENGINE ENDPOINT TESTS ===\n');
