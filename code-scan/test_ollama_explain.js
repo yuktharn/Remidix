@@ -1,7 +1,7 @@
 const ctrl = new AbortController();
 const t = setTimeout(() => ctrl.abort(), 120000);
 
-fetch('http://localhost:4000/ai/explain', {
+fetch('https://remidix-backend.onrender.com/ai/explain', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
   signal: ctrl.signal,
