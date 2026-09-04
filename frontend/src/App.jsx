@@ -15,7 +15,7 @@ import FolderScanResults from './components/FolderScanResults';
 import ChatBot from './components/ChatBot';
 import GitHubCallback from './components/GitHubCallback';
 
-const API_URL = 'http://localhost:4000';
+const API_URL = 'https://remidix-backend.onrender.com';
 
 // Sidebar nav, grouped to match the full feature list. "How It Works" reuses
 // the existing topbar modal instead of a page (special: 'modal'). Everything
@@ -3851,4 +3851,4 @@ export default function App() {
       />
     </div>
   );
-}
+}
