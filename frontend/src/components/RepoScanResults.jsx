@@ -16,7 +16,7 @@ import {
 } from '../vulnLogic';
 import PRCreationModal from './PRCreationModal';
 
-const API_URL = 'http://localhost:4000';
+const API_URL = 'https://remidix-backend.onrender.com';
 
 const SEVERITY_BG = {
   Critical: 'rgba(255, 60, 95, 0.15)',
