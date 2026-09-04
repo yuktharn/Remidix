@@ -1,128 +1,271 @@
 // depScanner.js
-// Checks dependencies (from a pasted/uploaded package.json) against OSV.dev —
-// a free, open, real-time vulnerability database used by GitHub and Google.
-// No API key required. This covers the "unsafe dependencies" requirement
-// from the problem statement.
+
+// Checks dependencies from a pasted/uploaded package.json against OSV.dev.
+// OSV is a public vulnerability database used for dependency security analysis.
+// Generates dependency findings with affected lines and available fixed versions.
 
 const OSV_BATCH_URL = "https://api.osv.dev/v1/querybatch";
 const OSV_VULN_URL = "https://api.osv.dev/v1/vulns";
 
 function parsePackageJson(content) {
   let parsed;
+
   try {
     parsed = JSON.parse(content);
   } catch {
     return [];
   }
-  const deps = { ...(parsed.dependencies || {}), ...(parsed.devDependencies || {}) };
-  return Object.entries(deps).map(([name, versionRange]) => ({
+
+  const dependencies = {
+    ...(parsed.dependencies || {}),
+    ...(parsed.devDependencies || {}),
+  };
+
+  return Object.entries(dependencies).map(([name, versionRange]) => ({
     name,
-    // strip ^ ~ >= etc. so we send OSV a concrete version to check
     version: String(versionRange).replace(/^[\^~>=<]+/, ""),
+    rawVersion: String(versionRange),
   }));
 }
 
-function severityFromOSV(vuln) {
-  // Try CVSS-based severity first (score out of 10)
-  const cvssScore = vuln?.severity?.[0]?.score;
+function severityFromOSV(vulnerability) {
+  const cvssScore = vulnerability?.severity?.[0]?.score;
+
   if (cvssScore) {
     const score = parseFloat(cvssScore);
-    if (!isNaN(score)) {
+
+    if (!Number.isNaN(score)) {
       if (score >= 9) return "Critical";
       if (score >= 7) return "High";
       if (score >= 4) return "Medium";
+
       return "Low";
     }
   }
 
-  // Fall back to GitHub Security Advisory's own severity label — most
-  // npm/GHSA entries report severity this way instead of via CVSS vectors.
-  const ghsaSeverity = vuln?.database_specific?.severity;
+  const ghsaSeverity =
+    vulnerability?.database_specific?.severity;
+
   if (ghsaSeverity) {
-    const map = { CRITICAL: "Critical", HIGH: "High", MODERATE: "Medium", LOW: "Low" };
-    if (map[ghsaSeverity]) return map[ghsaSeverity];
+    const map = {
+      CRITICAL: "Critical",
+      HIGH: "High",
+      MODERATE: "Medium",
+      LOW: "Low",
+    };
+
+    if (map[ghsaSeverity]) {
+      return map[ghsaSeverity];
+    }
   }
 
-  return "Medium"; // genuine unknown — reasonable default
+  return "High";
 }
 
-// Pulls the first "fixed" version out of an OSV vuln's affected/ranges/events
-// for the given package name, if one is published. Returns null if OSV
-// doesn't specify a fixed version (common for ranges that are still open).
 function extractFixedVersion(detail, packageName) {
-  if (!Array.isArray(detail.affected)) return null;
-  for (const aff of detail.affected) {
-    if (aff.package?.name && aff.package.name !== packageName) continue;
-    for (const range of aff.ranges || []) {
+  if (!Array.isArray(detail?.affected)) {
+    return null;
+  }
+
+  for (const affected of detail.affected) {
+    if (
+      affected.package?.name &&
+      affected.package.name !== packageName
+    ) {
+      continue;
+    }
+
+    for (const range of affected.ranges || []) {
       for (const event of range.events || []) {
-        if (event.fixed) return event.fixed;
+        if (event.fixed) {
+          return event.fixed;
+        }
       }
     }
   }
+
   return null;
+}
+
+function findDependencyLine(lines, packageName) {
+  const escapedPackageName = packageName.replace(
+    /[.*+?^${}()|[\]\\]/g,
+    "\\$&"
+  );
+
+  const pattern = new RegExp(
+    `"${escapedPackageName}"\\s*:`
+  );
+
+  for (let index = 0; index < lines.length; index++) {
+    if (pattern.test(lines[index])) {
+      return index + 1;
+    }
+  }
+
+  return 1;
 }
 
 async function scanDependencies(packageJsonContent) {
   const packages = parsePackageJson(packageJsonContent);
-  if (packages.length === 0) return [];
+
+  if (packages.length === 0) {
+    return [];
+  }
+
+  const lines = packageJsonContent.split(/\r?\n/);
 
   try {
-    const batchRes = await fetch(OSV_BATCH_URL, {
+    const batchResponse = await fetch(OSV_BATCH_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+      },
       body: JSON.stringify({
-        queries: packages.map((p) => ({
-          package: { name: p.name, ecosystem: "npm" },
-          version: p.version,
+        queries: packages.map((pkg) => ({
+          package: {
+            name: pkg.name,
+            ecosystem: "npm",
+          },
+          version: pkg.version,
         })),
       }),
     });
 
-    if (!batchRes.ok) {
-      console.error("OSV batch query failed:", batchRes.status);
+    if (!batchResponse.ok) {
+      console.error(
+        "OSV batch query failed:",
+        batchResponse.status,
+        batchResponse.statusText
+      );
+
       return [];
     }
 
-    const batchData = await batchRes.json();
+    const batchData = await batchResponse.json();
+
     const findings = [];
 
-    for (let i = 0; i < packages.length; i++) {
-      const vulns = batchData.results?.[i]?.vulns || [];
-      // cap at 3 per package so one badly-outdated dependency doesn't blow up the scan
-      for (const v of vulns.slice(0, 3)) {
-        let detail = v;
+    for (let index = 0; index < packages.length; index++) {
+      const pkg = packages[index];
+
+      const vulnerabilities =
+        batchData.results?.[index]?.vulns || [];
+
+      if (vulnerabilities.length === 0) {
+        continue;
+      }
+
+      const lineNumber = findDependencyLine(
+        lines,
+        pkg.name
+      );
+
+      for (const vulnerability of vulnerabilities.slice(0, 3)) {
+        let detail = vulnerability;
+
         try {
-          const detailRes = await fetch(`${OSV_VULN_URL}/${v.id}`);
-          if (detailRes.ok) detail = await detailRes.json();
-        } catch {
-          // fine — we fall back to a generic message below
+          const detailResponse = await fetch(
+            `${OSV_VULN_URL}/${encodeURIComponent(vulnerability.id)}`
+          );
+
+          if (detailResponse.ok) {
+            detail = await detailResponse.json();
+          }
+        } catch (error) {
+          // Use the batch response if the detailed request fails.
+          console.warn(
+            `Could not retrieve OSV details for ${vulnerability.id}:`,
+            error.message
+          );
         }
 
+        const fixedVersion =
+          extractFixedVersion(detail, pkg.name);
+
+        const vulnerableSnippet =
+          `"${pkg.name}": "${pkg.rawVersion}"`;
+
+        const correctedSnippet = fixedVersion
+          ? `"${pkg.name}": "^${fixedVersion}"`
+          : `"${pkg.name}": "${pkg.rawVersion}"`;
+
+        const summary =
+          detail.summary ||
+          `${pkg.name}@${pkg.version} has a known public vulnerability (${vulnerability.id}).`;
+
+        const vulnerabilityUrl =
+          `https://osv.dev/vulnerability/${encodeURIComponent(
+            vulnerability.id
+          )}`;
+
+        const remediation = fixedVersion
+          ? `Upgrade "${pkg.name}" to version ${fixedVersion} or later. Example: npm install ${pkg.name}@${fixedVersion}`
+          : `Check the OSV advisory ${vulnerability.id} for the currently recommended patched version of "${pkg.name}".`;
+
         findings.push({
-          type: "Vulnerable Dependency",
-          category: "Unsafe Dependencies",
+          type: `Outdated Dependency: ${pkg.name}`,
+
+          category: "Outdated Dependencies",
+
           severity: severityFromOSV(detail),
-          line: null,
-          packageName: packages[i].name,
-          version: packages[i].version,
-          vulnId: v.id,
-          publishedDate: detail.published || null,
-          fixedVersion: extractFixedVersion(detail, packages[i].name),
-          osvUrl: `https://osv.dev/vulnerability/${v.id}`,
-          explanation: detail.summary || `${packages[i].name}@${packages[i].version} has a known vulnerability (${v.id}).`,
-          fix: `Upgrade ${packages[i].name} past the affected range. See ${v.id} for the patched version.`,
-          confidence: 0.95,
+
+          line: lineNumber,
+          lineEnd: lineNumber,
+
+          packageName: pkg.name,
+
+          version: pkg.version,
+
+          vulnId: vulnerability.id,
+
+          publishedDate:
+            detail.published || null,
+
+          fixedVersion,
+
+          osvUrl: vulnerabilityUrl,
+
+          vulnerableCode: vulnerableSnippet,
+
+          correctedCode: correctedSnippet,
+
+          cwe:
+            "CWE-1395: Dependency on Vulnerable Third-Party Component",
+
+          owasp:
+            "A06:2021-Vulnerable and Outdated Components",
+
+          explanation: summary,
+
+          impact:
+            "Attackers may exploit a known vulnerability in the affected dependency to compromise application confidentiality, integrity, or availability, depending on the advisory and how the dependency is used.",
+
+          fix: remediation,
+
+          confidence: 0.98,
+
           method: "dependency",
-          matchPreview: `${packages[i].name}@${packages[i].version}`,
+
+          matchPreview:
+            `${pkg.name}@${pkg.version}`,
+
+          status: "open",
         });
       }
     }
 
     return findings;
-  } catch (err) {
-    console.error("Dependency scan failed:", err.message);
+  } catch (error) {
+    console.error(
+      "Dependency scan failed:",
+      error.message
+    );
+
     return [];
   }
 }
 
-module.exports = { scanDependencies };
+module.exports = {
+  scanDependencies,
+};

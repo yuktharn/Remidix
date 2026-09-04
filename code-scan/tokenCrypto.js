@@ -22,24 +22,31 @@ function getKeyBuffer() {
   return Buffer.from(key, "hex");
 }
 
-// Returns { encryptedToken, iv, authTag } — all hex strings, safe to store
+// Returns { encrypted, encryptedToken, iv, authTag } — all hex strings, safe to store
 // as-is in three separate columns.
 function encryptToken(plainToken) {
+  if (!plainToken) return null;
   const iv = crypto.randomBytes(12); // 96-bit IV, recommended for GCM
   const cipher = crypto.createCipheriv(ALGORITHM, getKeyBuffer(), iv);
   const encrypted = Buffer.concat([cipher.update(plainToken, "utf8"), cipher.final()]);
   const authTag = cipher.getAuthTag();
 
+  const encHex = encrypted.toString("hex");
+  const ivHex = iv.toString("hex");
+  const tagHex = authTag.toString("hex");
+
   return {
-    encryptedToken: encrypted.toString("hex"),
-    iv: iv.toString("hex"),
-    authTag: authTag.toString("hex"),
+    encrypted: encHex,
+    encryptedToken: encHex, // alias for backwards compatibility
+    iv: ivHex,
+    authTag: tagHex,
   };
 }
 
 // Reverses encryptToken(). Throws if the auth tag doesn't match (tampered
 // or wrong key) — always wrap this in try/catch at the call site.
 function decryptToken(encryptedTokenHex, ivHex, authTagHex) {
+  if (!encryptedTokenHex || !ivHex || !authTagHex) return null;
   const decipher = crypto.createDecipheriv(ALGORITHM, getKeyBuffer(), Buffer.from(ivHex, "hex"));
   decipher.setAuthTag(Buffer.from(authTagHex, "hex"));
   const decrypted = Buffer.concat([

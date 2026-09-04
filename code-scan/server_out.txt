@@ -1,0 +1,5 @@
+◇ injected env (8) from .env // tip: ⌘ suppress logs { quiet: true }
+◇ injected env (0) from .env // tip: ⌁ auth for agents [www.vestauth.com]
+◇ injected env (0) from .env // tip: ⌘ custom filepath { path: '/custom/path/.env' }
+SecureCode backend running on http://localhost:4000
+Connected to MySQL (SecureCode database)

@@ -1,0 +1,818 @@
+// RepoFilesPanel.jsx
+// Repository detail explorer: file/folder tree on the left, a searchable /
+// filterable / paginated issue list on the right, and a full vulnerable-vs-fixed
+// code detail card below — matching the SecureCode reference design.
+//
+// Per-file, per-line finding detail isn't served by the API yet, so this view
+// builds a realistic, deterministic mock breakdown from the project's own
+// (real) severity totals — every number on the stat cards ties back to the
+// same `project` object the rest of the dashboard already uses. Only the
+// file tree and line-level finding detail are generated client-side.
+
+import { useState, useEffect, useMemo } from 'react';
+import {
+  Folder, FolderOpen, FileCode, FileText, File as FileIcon, ChevronRight,
+  Search, ShieldAlert, ArrowRight, Copy, Check, CheckCircle2, AlertTriangle,
+  Loader2, RefreshCw, Download, ExternalLink, ShieldCheck, XCircle,
+} from 'lucide-react';
+
+const SEVERITY_COLORS = { Critical: '#ff3c5f', High: '#ff8a3d', Medium: '#f5b942', Low: '#38bdf8' };
+const SEVERITY_BG = {
+  Critical: 'rgba(255,60,95,0.15)', High: 'rgba(255,138,61,0.15)',
+  Medium: 'rgba(245,185,66,0.15)', Low: 'rgba(56,189,248,0.15)',
+};
+const SEVERITY_ORDER = ['Critical', 'High', 'Medium', 'Low'];
+
+// ---------------------------------------------------------------------
+// Deterministic seeded RNG so a given project always renders the same
+// mock breakdown (no layout/count jitter on every re-render).
+// ---------------------------------------------------------------------
+function seedFromString(str) {
+  let h = 1779033703 ^ str.length;
+  for (let i = 0; i < str.length; i++) {
+    h = Math.imul(h ^ str.charCodeAt(i), 3432918353);
+    h = (h << 13) | (h >>> 19);
+  }
+  return () => {
+    h = Math.imul(h ^ (h >>> 16), 2246822507);
+    h = Math.imul(h ^ (h >>> 13), 3266489909);
+    return ((h ^= h >>> 16) >>> 0) / 4294967296;
+  };
+}
+
+function seededShuffle(arr, rng) {
+  const out = [...arr];
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------
+// Repository file tree — folders shown collapsed (no drill-down content
+// yet), files carry a scan icon + issue-count badge.
+// ---------------------------------------------------------------------
+const FOLDERS = ['.github', 'config', 'models', 'public', 'routes', 'utils'];
+const FILE_WEIGHTS = [
+  ['.env', 1],
+  ['.gitignore', 0],
+  ['app.js', 5],
+  ['package.json', 2],
+  ['package-lock.json', 1],
+  ['README.md', 0],
+  ['server.js', 7],
+  ['userController.js', 4],
+  ['db.js', 3],
+  ['auth.js', 2],
+];
+
+// ---------------------------------------------------------------------
+// Vulnerability templates. Each carries a small ready-made code window
+// (a couple of context lines + the vulnerable line + its fix) so the
+// side-by-side viewer can render a real-looking snippet for any file.
+// ---------------------------------------------------------------------
+const TEMPLATES = {
+  Critical: [
+    {
+      type: 'SQL Injection', category: 'Injection Flaws', cwe: 'CWE-89: SQL Injection', owasp: 'A03:2021 – Injection',
+      description: 'The application builds a SQL query by directly concatenating unsanitized user input, which lets an attacker alter the query\'s meaning.',
+      impact: 'An attacker can read, modify, or delete arbitrary data in the database, and in some configurations escalate to full database or server compromise.',
+      recommendation: 'Use parameterized queries or an ORM query builder so user input is always passed as a bound value, never concatenated into SQL text.',
+      before: ['// Get user by ID', 'const id = req.query.id;'],
+      vuln: 'const query = "SELECT * FROM users WHERE id = " + req.query.id;',
+      fix: 'const query = "SELECT * FROM users WHERE id = ?";',
+      after: ['db.query(query, [id], (err, result) => {', '  if (err) {'],
+    },
+    {
+      type: 'Command Injection', category: 'Injection Flaws', cwe: 'CWE-78: OS Command Injection', owasp: 'A03:2021 – Injection',
+      description: 'User-controlled input is passed straight into a shell command, allowing arbitrary command execution on the host.',
+      impact: 'An attacker can run arbitrary OS commands, read or exfiltrate server files, or pivot further into internal infrastructure.',
+      recommendation: 'Avoid shelling out with user input. Use an execFile/spawn call with an argument array, or validate input against a strict allow-list.',
+      before: ['const host = req.body.host;', '// Ping the requested host'],
+      vuln: 'exec("ping -c 1 " + host, (err, stdout) => {',
+      fix: 'execFile("ping", ["-c", "1", host], (err, stdout) => {',
+      after: ['  res.send(stdout);', '});'],
+    },
+    {
+      type: 'Hardcoded Admin Credentials', category: 'Insecure Authentication', cwe: 'CWE-798: Use of Hard-coded Credentials', owasp: 'A07:2021 – Identification and Authentication Failures',
+      description: 'A backdoor admin username and password are hardcoded directly into the authentication logic.',
+      impact: 'Anyone who reads the source (or decompiles the build) gets a permanent, unrevokable superadmin login.',
+      recommendation: 'Remove hardcoded credentials entirely. Store admin accounts in the database with hashed passwords, provisioned through a secure setup flow.',
+      before: ['const { username, password } = req.body;', ''],
+      vuln: "if (username === 'admin' && password === 'admin123') {",
+      fix: 'const user = await Users.findByCredentials(username, password);',
+      after: ["  return res.json({ role: 'superadmin' });", '}'],
+    },
+    {
+      type: 'Hardcoded API Secret', category: 'Secrets Exposure', cwe: 'CWE-798: Use of Hard-coded Credentials', owasp: 'A02:2021 – Cryptographic Failures',
+      description: 'A live API secret key is committed directly in source code instead of being loaded from a secret store.',
+      impact: 'Anyone with repo access — including in git history — can use the key to impersonate the service or incur cost on the account.',
+      recommendation: 'Move the key to an environment variable loaded via dotenv or a secrets manager, and rotate the exposed key immediately.',
+      before: ['// Third-party API credentials', ''],
+      vuln: 'const API_KEY = "sk_test_1234567890abcdef";',
+      fix: 'const API_KEY = process.env.API_KEY;',
+      after: ['', 'async function callApi() {'],
+    },
+  ],
+  High: [
+    {
+      type: 'Cross-Site Scripting (XSS)', category: 'Injection Flaws', cwe: 'CWE-79: Cross-Site Scripting', owasp: 'A03:2021 – Injection',
+      description: 'User input is reflected back into the HTML response without escaping, so a crafted request can inject a script tag.',
+      impact: 'An attacker can hijack sessions, steal cookies, or perform actions on behalf of a victim who clicks a crafted link.',
+      recommendation: 'Escape user input before embedding it in HTML, or render it through a templating engine that auto-escapes by default.',
+      before: ["const name = req.query.name;", '// Render welcome banner'],
+      vuln: "res.send('<h1>Welcome ' + name + '</h1>');",
+      fix: "res.send(`<h1>Welcome ${escapeHtml(name)}</h1>`);",
+      after: ['});', ''],
+    },
+    {
+      type: 'Path Traversal', category: 'Injection Flaws', cwe: 'CWE-22: Path Traversal', owasp: 'A01:2021 – Broken Access Control',
+      description: 'A user-supplied filename is concatenated into a filesystem path without normalizing or restricting it.',
+      impact: 'An attacker can use "../" sequences to read arbitrary files on disk, including config files and credentials.',
+      recommendation: 'Resolve the path and verify it stays within the intended base directory before reading the file.',
+      before: ['const file = req.query.filename;', '// Serve a stored file'],
+      vuln: "fs.readFile('/var/data/' + file, 'utf8', (err, data) => {",
+      fix: "fs.readFile(path.join(SAFE_DIR, path.basename(file)), 'utf8', (err, data) => {",
+      after: ['  res.send(data);', '});'],
+    },
+    {
+      type: 'Insecure TLS Configuration', category: 'Security Misconfigurations', cwe: 'CWE-295: Improper Certificate Validation', owasp: 'A02:2021 – Cryptographic Failures',
+      description: 'Certificate validation is explicitly disabled on outbound HTTPS requests.',
+      impact: 'The app can be silently man-in-the-middled — an attacker on the network path can intercept or tamper with traffic.',
+      recommendation: 'Never disable certificate validation in production. If a private CA is involved, add its certificate to the trust store instead.',
+      before: ['// Outbound HTTPS agent', ''],
+      vuln: 'const agent = new https.Agent({ rejectUnauthorized: false });',
+      fix: 'const agent = new https.Agent({ rejectUnauthorized: true });',
+      after: ['', 'module.exports = agent;'],
+    },
+    {
+      type: 'Outdated Dependency', category: 'Outdated Dependencies', cwe: 'CWE-1395: Dependency on Vulnerable Third-Party Component', owasp: 'A06:2021 – Vulnerable and Outdated Components',
+      description: 'This dependency version has a publicly disclosed vulnerability with a patched release already available.',
+      impact: 'Depending on the advisory, an attacker may achieve remote code execution, denial of service, or data exposure through this package.',
+      recommendation: 'Upgrade to the patched version referenced in the advisory and re-run the dependency scan to confirm.',
+      before: ['"dependencies": {', '  "express": "^5.2.1",'],
+      vuln: '  "lodash": "4.17.10",',
+      fix: '  "lodash": "^4.17.21",',
+      after: ['  "mysql2": "^3.23.2"', '}'],
+    },
+  ],
+  Medium: [
+    {
+      type: 'Insecure Direct Object Reference', category: 'Broken Access Control', cwe: 'CWE-639: Authorization Bypass Through User-Controlled Key', owasp: 'A01:2021 – Broken Access Control',
+      description: 'A record is looked up directly by an ID from the request with no check that the requester owns or may access it.',
+      impact: 'Any authenticated user can read or modify another user\'s data simply by changing the ID in the request.',
+      recommendation: 'Verify the record belongs to (or is shared with) the requesting user before returning or mutating it.',
+      before: ['// Fetch a user profile by id', ''],
+      vuln: 'User.findById(req.params.id);',
+      fix: 'User.findOne({ _id: req.params.id, ownerId: req.user.id });',
+      after: ['', 'res.json(user);'],
+    },
+    {
+      type: 'Missing Input Validation', category: 'Security Misconfigurations', cwe: 'CWE-20: Improper Input Validation', owasp: 'A04:2021 – Insecure Design',
+      description: 'Request body fields are used directly with no shape, type, or format validation.',
+      impact: 'Malformed or unexpected input can crash request handlers, corrupt stored data, or open the door to downstream injection issues.',
+      recommendation: 'Validate the request body against a schema (e.g. zod/Joi) before using any of its fields.',
+      before: ['// Update contact email', ''],
+      vuln: 'const email = req.body.email;',
+      fix: 'const { email } = updateEmailSchema.parse(req.body);',
+      after: ['user.email = email;', 'await user.save();'],
+    },
+    {
+      type: 'Weak Password Hashing (MD5)', category: 'Cryptographic Failures', cwe: 'CWE-916: Use of Password Hash With Insufficient Computational Effort', owasp: 'A02:2021 – Cryptographic Failures',
+      description: 'Passwords are hashed with MD5, a fast general-purpose hash never intended for password storage.',
+      impact: 'MD5 hashes can be brute-forced or rainbow-tabled at high speed, meaning a database leak quickly turns into plaintext passwords.',
+      recommendation: 'Use a slow, salted password hash such as bcrypt or argon2 with a suitable work factor.',
+      before: ['const { username, password } = req.body;', ''],
+      vuln: "const hash = crypto.createHash('md5').update(password).digest('hex');",
+      fix: 'const hash = await bcrypt.hash(password, 12);',
+      after: ['', 'res.json({ hash });'],
+    },
+    {
+      type: 'Outdated Dependency', category: 'Outdated Dependencies', cwe: 'CWE-1395: Dependency on Vulnerable Third-Party Component', owasp: 'A06:2021 – Vulnerable and Outdated Components',
+      description: 'This dependency version has a moderate-severity advisory with a fix already released upstream.',
+      impact: 'Exploitability depends on how the package is used, but leaving it unpatched keeps a known weakness in the dependency tree.',
+      recommendation: 'Bump to the fixed version and re-run `npm audit` / the dependency scan to confirm the advisory clears.',
+      before: ['"devDependencies": {', '  "nodemon": "^2.0.4",'],
+      vuln: '  "minimist": "1.2.5",',
+      fix: '  "minimist": "^1.2.8",',
+      after: ['}', ''],
+    },
+  ],
+  Low: [
+    {
+      type: 'Verbose Error Disclosure', category: 'Information Disclosure', cwe: 'CWE-209: Generation of Error Message Containing Sensitive Information', owasp: 'A05:2021 – Security Misconfiguration',
+      description: 'The raw error object, including its stack trace, is sent straight back in the API response.',
+      impact: 'Stack traces can leak file paths, library versions, and internal logic that help an attacker plan further attacks.',
+      recommendation: 'Log the full error server-side, but return a generic message and error code to the client.',
+      before: ['db.query(sql, (err, result) => {', '  if (err) {'],
+      vuln: '    return res.status(500).json({ error: err.message, stack: err.stack });',
+      fix: "    return res.status(500).json({ error: 'Internal server error' });",
+      after: ['  }', '});'],
+    },
+    {
+      type: 'Missing Rate Limiting', category: 'Security Misconfigurations', cwe: 'CWE-770: Allocation of Resources Without Limits or Throttling', owasp: 'A04:2021 – Insecure Design',
+      description: 'The login endpoint has no request-rate limiting, so it can be called an unlimited number of times.',
+      impact: 'An attacker can brute-force credentials or exhaust server resources with a high-volume request flood.',
+      recommendation: 'Add a rate limiter (e.g. express-rate-limit) scoped to this route, keyed by IP and/or account.',
+      before: ["app.post('/login', (req, res) => {", '  // Authenticate user'],
+      vuln: '  const { username, password } = req.body;',
+      fix: 'app.post(\'/login\', loginRateLimiter, (req, res) => {',
+      after: ['  // ...', '});'],
+    },
+    {
+      type: 'Permissive CORS Policy', category: 'Security Misconfigurations', cwe: 'CWE-942: Overly Permissive Cross-domain Whitelist', owasp: 'A05:2021 – Security Misconfiguration',
+      description: 'CORS is configured to allow requests from any origin.',
+      impact: 'Any website can make authenticated cross-origin requests on behalf of a logged-in user, widening the attack surface for CSRF-style abuse.',
+      recommendation: 'Restrict allowed origins to a known allow-list instead of "*", especially on routes that use cookies or auth headers.',
+      before: ['// CORS configuration', ''],
+      vuln: "app.use(cors({ origin: '*' }));",
+      fix: "app.use(cors({ origin: ALLOWED_ORIGINS }));",
+      after: ['', 'app.use(express.json());'],
+    },
+  ],
+};
+
+function templateFor(fileName, severity, idx) {
+  const isDependencyFile = fileName === 'package.json' || fileName === 'package-lock.json';
+  if (isDependencyFile) {
+    const depPool = [...TEMPLATES.High, ...TEMPLATES.Medium].filter((t) => t.category === 'Outdated Dependencies');
+    return depPool[idx % depPool.length];
+  }
+  if (fileName === '.env') {
+    return TEMPLATES.Critical.find((t) => t.type === 'Hardcoded API Secret');
+  }
+  const pool = TEMPLATES[severity] || TEMPLATES.Medium;
+  return pool[idx % pool.length];
+}
+
+function fileIconFor(name) {
+  if (name.endsWith('.js') || name.endsWith('.jsx')) return FileCode;
+  if (name.endsWith('.json')) return FileCode;
+  if (name.endsWith('.md')) return FileText;
+  return FileIcon;
+}
+
+// ---------------------------------------------------------------------
+// Build the mock repository tree + per-file findings from real project totals.
+// ---------------------------------------------------------------------
+function buildRepoData(project) {
+  const rng = seedFromString(String(project?.id ?? project?.name ?? 'repo'));
+
+  const critical = project?.critical || 0;
+  const high = project?.high || 0;
+  const medium = project?.medium || 0;
+  const low = project?.low || 0;
+  const total = critical + high + medium + low;
+
+  // One slot per issue, tagged with its severity.
+  let severitySequence = [
+    ...Array(critical).fill('Critical'),
+    ...Array(high).fill('High'),
+    ...Array(medium).fill('Medium'),
+    ...Array(low).fill('Low'),
+  ];
+  severitySequence = seededShuffle(severitySequence, rng);
+
+  // Weighted pool of file slots to pair issues against.
+  let filePool = [];
+  FILE_WEIGHTS.forEach(([name, weight]) => {
+    for (let i = 0; i < weight; i++) filePool.push(name);
+  });
+  filePool = seededShuffle(filePool, rng);
+
+  const findingsByFile = {};
+  FILE_WEIGHTS.forEach(([name]) => { findingsByFile[name] = []; });
+
+  const lineCursor = {};
+  FILE_WEIGHTS.forEach(([name]) => { lineCursor[name] = 6 + Math.floor(rng() * 6); });
+
+  const templateCursor = {};
+
+  severitySequence.forEach((severity, i) => {
+    if (filePool.length === 0) return;
+    const fileName = filePool[i % filePool.length];
+    templateCursor[fileName] = (templateCursor[fileName] || 0) + 1;
+    const template = templateFor(fileName, severity, templateCursor[fileName]);
+    if (!template) return;
+
+    const line = lineCursor[fileName];
+    lineCursor[fileName] = line + 4 + Math.floor(rng() * 6);
+
+    findingsByFile[fileName].push({
+      key: `${fileName}:${line}:${i}`,
+      file: fileName,
+      severity,
+      line,
+      ...template,
+    });
+  });
+
+  // Sort each file's findings by line number for a natural top-to-bottom read.
+  Object.keys(findingsByFile).forEach((name) => {
+    findingsByFile[name].sort((a, b) => a.line - b.line);
+  });
+
+  const fileList = FILE_WEIGHTS.map(([name]) => {
+    const findings = findingsByFile[name];
+    const worstSeverity = SEVERITY_ORDER.find((s) => findings.some((f) => f.severity === s)) || null;
+    return { name, count: findings.length, worstSeverity };
+  });
+
+  return { fileList, findingsByFile, total, critical, high, medium, low };
+}
+
+function highlightUserInput(line) {
+  const parts = line.split(/(req\.(?:query|body|params)(?:\.\w+)?)/g);
+  return parts.map((part, i) =>
+    /^req\.(query|body|params)/.test(part)
+      ? <span key={i} style={{ color: '#ff8a3d' }}>{part}</span>
+      : <span key={i}>{part}</span>
+  );
+}
+
+export default function RepoFilesPanel({ project }) {
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [repoData, setRepoData] = useState(null);
+
+  const [selectedFile, setSelectedFile] = useState(null); // null = all files
+  const [selectedIssueKey, setSelectedIssueKey] = useState(null);
+  const [severityFilter, setSeverityFilter] = useState('all');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [fileSearch, setFileSearch] = useState('');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [copiedFix, setCopiedFix] = useState(false);
+  const pageSize = 5;
+
+  function load() {
+    setLoading(true);
+    setLoadError(false);
+    setTimeout(() => {
+      try {
+        if (!project) throw new Error('No project supplied');
+        setRepoData(buildRepoData(project));
+        setLoading(false);
+      } catch (err) {
+        console.error('Failed to build repository view:', err);
+        setLoadError(true);
+        setLoading(false);
+      }
+    }, 550);
+  }
+
+  useEffect(() => {
+    load();
+    setSelectedFile(null);
+    setSelectedIssueKey(null);
+    setSeverityFilter('all');
+    setSearchQuery('');
+    setCurrentPage(1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project?.id]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [selectedFile, severityFilter, searchQuery]);
+
+  const allFindings = useMemo(() => {
+    if (!repoData) return [];
+    return Object.values(repoData.findingsByFile).flat();
+  }, [repoData]);
+
+  const scopedFindings = useMemo(() => {
+    if (!repoData) return [];
+    const base = selectedFile ? (repoData.findingsByFile[selectedFile] || []) : allFindings;
+    return base.filter((f) => {
+      if (severityFilter !== 'all' && f.severity.toLowerCase() !== severityFilter) return false;
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase();
+        const match =
+          f.type.toLowerCase().includes(q) ||
+          f.vuln.toLowerCase().includes(q) ||
+          f.file.toLowerCase().includes(q);
+        if (!match) return false;
+      }
+      return true;
+    });
+  }, [repoData, selectedFile, severityFilter, searchQuery, allFindings]);
+
+  const severityCounts = useMemo(() => {
+    const base = selectedFile ? (repoData?.findingsByFile[selectedFile] || []) : allFindings;
+    const counts = { Critical: 0, High: 0, Medium: 0, Low: 0 };
+    base.forEach((f) => { counts[f.severity] = (counts[f.severity] || 0) + 1; });
+    return counts;
+  }, [repoData, selectedFile, allFindings]);
+
+  const totalPages = Math.max(1, Math.ceil(scopedFindings.length / pageSize));
+  const paginated = scopedFindings.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const selectedIssue = scopedFindings.find((f) => f.key === selectedIssueKey) || paginated[0] || null;
+
+  function handleCopyFix() {
+    if (!selectedIssue) return;
+    navigator.clipboard.writeText(selectedIssue.fix);
+    setCopiedFix(true);
+    setTimeout(() => setCopiedFix(false), 1800);
+  }
+
+  function handleDownloadReport() {
+    if (!repoData) return;
+    const blob = new Blob([JSON.stringify({ project: project?.name, ...repoData }, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${(project?.name || 'repository').toLowerCase().replace(/\s+/g, '-')}-report.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  const scoreColor = (project?.securityScore ?? 0) >= 80 ? '#4fd08a' : (project?.securityScore ?? 0) >= 60 ? '#e8a33d' : '#e2504a';
+  const scoreLabel = (project?.securityScore ?? 0) >= 80 ? 'Excellent' : (project?.securityScore ?? 0) >= 60 ? 'Good' : 'Poor';
+
+  const visibleFileNames = useMemo(() => {
+    if (!repoData) return [];
+    if (!fileSearch.trim()) return repoData.fileList.map((f) => f.name);
+    const q = fileSearch.toLowerCase();
+    return repoData.fileList.filter((f) => f.name.toLowerCase().includes(q)).map((f) => f.name);
+  }, [repoData, fileSearch]);
+
+  // ---- Loading state ----
+  if (loading) {
+    return (
+      <section className="panel repo-explorer-panel">
+        <div className="repo-loading-state">
+          <Loader2 size={28} className="spin" />
+          <p>Loading repository files and scan results…</p>
+        </div>
+      </section>
+    );
+  }
+
+  // ---- Error state ----
+  if (loadError || !repoData) {
+    return (
+      <section className="panel repo-explorer-panel">
+        <div className="repo-error-state">
+          <XCircle size={40} style={{ color: '#e2504a' }} />
+          <h3>Couldn't load repository files</h3>
+          <p className="empty-sub">Something went wrong while preparing this repository's scan results.</p>
+          <button className="scan-btn" onClick={load}>
+            <RefreshCw size={14} /> Retry
+          </button>
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '10px' }}>
+        <button className="ghost-btn" onClick={handleDownloadReport}>
+          <Download size={14} /> Download Report
+        </button>
+      </div>
+
+      {/* Stat cards */}
+      <div className="repo-stats-grid">
+        <div className="dash-sub-panel">
+          <h3>Security Score</h3>
+          <div className="dash-donut-row">
+            <svg width="88" height="88" viewBox="0 0 42 42">
+              <circle cx="21" cy="21" r="15.9" fill="transparent" stroke="#232633" strokeWidth="6" />
+              <circle
+                cx="21" cy="21" r="15.9" fill="transparent"
+                stroke={scoreColor} strokeWidth="6"
+                strokeDasharray={`${project?.securityScore ?? 0} ${100 - (project?.securityScore ?? 0)}`}
+                strokeDashoffset="25"
+              />
+              <text x="21" y="19" textAnchor="middle" fontSize="8" fill="#e8e9ee" fontWeight="700">{project?.securityScore ?? 0}</text>
+              <text x="21" y="26" textAnchor="middle" fontSize="3.4" fill="#5c5f6d">/100</text>
+            </svg>
+            <div className="dash-stat-sub" style={{ color: scoreColor, fontWeight: 600 }}>{scoreLabel}</div>
+          </div>
+        </div>
+
+        <div className="dash-sub-panel">
+          <h3>Severity Breakdown</h3>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '7px' }}>
+            <div className="dash-cat-row"><span className="dash-dot" style={{ background: '#ff3c5f' }} /><div className="dash-cat-label">Critical</div><div className="dash-cat-count" style={{ color: '#ff3c5f' }}>{repoData.critical}</div></div>
+            <div className="dash-cat-row"><span className="dash-dot" style={{ background: '#ff8a3d' }} /><div className="dash-cat-label">High</div><div className="dash-cat-count" style={{ color: '#ff8a3d' }}>{repoData.high}</div></div>
+            <div className="dash-cat-row"><span className="dash-dot" style={{ background: '#f5b942' }} /><div className="dash-cat-label">Medium</div><div className="dash-cat-count" style={{ color: '#f5b942' }}>{repoData.medium}</div></div>
+            <div className="dash-cat-row"><span className="dash-dot" style={{ background: '#38bdf8' }} /><div className="dash-cat-label">Low</div><div className="dash-cat-count" style={{ color: '#38bdf8' }}>{repoData.low}</div></div>
+          </div>
+        </div>
+
+        <div className="dash-sub-panel">
+          <h3>Remediation Progress</h3>
+          <div style={{ marginTop: '6px' }}>
+            <div className="dash-cat-track" style={{ height: '8px', marginBottom: '8px' }}>
+              <div className="dash-cat-fill" style={{
+                width: `${project?.remediationProgress ?? 0}%`,
+                background: (project?.remediationProgress ?? 0) >= 80 ? '#4fd08a' : (project?.remediationProgress ?? 0) >= 50 ? '#e8a33d' : '#e2504a',
+              }} />
+            </div>
+            <div style={{ fontSize: '18px', fontWeight: 700, color: '#a98cf0' }}>{project?.remediationProgress ?? 0}%</div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11.5px', color: 'var(--text-faint)', marginTop: '6px' }}>
+              <span>Fixed: {Math.round((repoData.total * (project?.remediationProgress ?? 0)) / 100)}</span>
+              <span>Remaining: {repoData.total - Math.round((repoData.total * (project?.remediationProgress ?? 0)) / 100)}</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="dash-sub-panel">
+          <h3>Total Issues</h3>
+          <div style={{ fontSize: '30px', fontWeight: 700, marginTop: '6px' }}>{repoData.total}</div>
+          <div className="dash-stat-sub">Across {repoData.fileList.filter((f) => f.count > 0).length} files</div>
+        </div>
+      </div>
+
+      {/* Tree + issues layout */}
+      <div className="repo-explorer-grid">
+        {/* File tree */}
+        <div className="repo-tree-panel">
+          <div className="repo-tree-search">
+            <Search size={13} className="search-icon-inside" />
+            <input
+              className="issues-search-input"
+              placeholder="Search files…"
+              value={fileSearch}
+              onChange={(e) => setFileSearch(e.target.value)}
+            />
+          </div>
+
+          <div className="repo-tree-scroll">
+            <div className="repo-tree-root">
+              <FolderOpen size={14} /> <span>{project?.name || 'Repository'}</span>
+            </div>
+
+            {FOLDERS.map((dir) => (
+              <div className="repo-tree-dir" key={dir}>
+                <ChevronRight size={13} className="repo-tree-chevron" />
+                <Folder size={14} style={{ color: '#e8a33d' }} />
+                <span>{dir}</span>
+              </div>
+            ))}
+
+            {repoData.fileList
+              .filter((f) => visibleFileNames.includes(f.name))
+              .map((f) => {
+                const Icon = fileIconFor(f.name);
+                const isSelected = selectedFile === f.name;
+                const badgeColor = f.worstSeverity ? SEVERITY_COLORS[f.worstSeverity] : null;
+                return (
+                  <div
+                    key={f.name}
+                    className={`repo-tree-file ${isSelected ? 'selected' : ''}`}
+                    onClick={() => { setSelectedFile(isSelected ? null : f.name); setSelectedIssueKey(null); }}
+                  >
+                    <Icon size={14} style={{ color: isSelected ? '#7ec3f5' : 'var(--text-faint)' }} />
+                    <span className="repo-tree-filename">{f.name}</span>
+                    {f.count > 0 && (
+                      <span className="repo-tree-badge" style={{ background: `${badgeColor}22`, color: badgeColor }}>
+                        {f.count}
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+
+            {visibleFileNames.length === 0 && (
+              <div className="empty-sub" style={{ padding: '16px 6px' }}>No files match "{fileSearch}".</div>
+            )}
+          </div>
+
+          <div className="repo-tree-legend">
+            <div className="repo-legend-title">Issue indicators</div>
+            <div className="repo-legend-grid">
+              <span><i style={{ background: '#ff3c5f' }} /> Critical</span>
+              <span><i style={{ background: '#f5b942' }} /> Medium</span>
+              <span><i style={{ background: '#ff8a3d' }} /> High</span>
+              <span><i style={{ background: '#38bdf8' }} /> Low</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Issues + detail */}
+        <div className="repo-issues-panel">
+          <div className="repo-issues-tabbar">
+            <button className={`results-tab-btn ${severityFilter === 'all' ? 'active' : ''}`} onClick={() => setSeverityFilter('all')}>
+              All Issues ({severityCounts.Critical + severityCounts.High + severityCounts.Medium + severityCounts.Low})
+            </button>
+            <button className={`results-tab-btn ${severityFilter === 'critical' ? 'active' : ''}`} onClick={() => setSeverityFilter('critical')}>
+              Critical ({severityCounts.Critical})
+            </button>
+            <button className={`results-tab-btn ${severityFilter === 'high' ? 'active' : ''}`} onClick={() => setSeverityFilter('high')}>
+              High ({severityCounts.High})
+            </button>
+            <button className={`results-tab-btn ${severityFilter === 'medium' ? 'active' : ''}`} onClick={() => setSeverityFilter('medium')}>
+              Medium ({severityCounts.Medium})
+            </button>
+            <button className={`results-tab-btn ${severityFilter === 'low' ? 'active' : ''}`} onClick={() => setSeverityFilter('low')}>
+              Low ({severityCounts.Low})
+            </button>
+
+            <div className="issues-search-wrap" style={{ marginLeft: 'auto' }}>
+              <Search size={13} className="search-icon-inside" />
+              <input
+                className="issues-search-input"
+                placeholder="Search issues…"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+              />
+            </div>
+          </div>
+
+          <div className="repo-issues-heading">
+            Issues in {selectedFile || 'all files'} ({scopedFindings.length})
+          </div>
+
+          {scopedFindings.length === 0 ? (
+            <div className="repo-empty-issues">
+              <CheckCircle2 size={32} style={{ color: '#4fd08a' }} />
+              <p>{searchQuery.trim() ? `No issues match "${searchQuery}".` : 'No issues found here — nice work!'}</p>
+            </div>
+          ) : (
+            <>
+              <div className="repo-issues-table-wrap">
+                <table className="repo-issues-table">
+                  <thead>
+                    <tr>
+                      <th>Issue</th>
+                      <th>Severity</th>
+                      <th>Line</th>
+                      <th>Code Preview</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {paginated.map((f) => (
+                      <tr
+                        key={f.key}
+                        className={selectedIssue?.key === f.key ? 'selected' : ''}
+                        onClick={() => setSelectedIssueKey(f.key)}
+                      >
+                        <td>
+                          <div className="repo-issue-cell">
+                            <ShieldAlert size={15} style={{ color: SEVERITY_COLORS[f.severity], flexShrink: 0 }} />
+                            <div>
+                              <div className="repo-issue-title">{f.type}</div>
+                              <div className="repo-issue-sub">{f.description.slice(0, 60)}{f.description.length > 60 ? '…' : ''}</div>
+                            </div>
+                          </div>
+                        </td>
+                        <td>
+                          <span className="sev-pill" style={{ color: SEVERITY_COLORS[f.severity], background: SEVERITY_BG[f.severity] }}>
+                            {f.severity}
+                          </span>
+                        </td>
+                        <td className="font-mono">{f.line}</td>
+                        <td className="font-mono repo-code-preview">{highlightUserInput(f.vuln.trim())}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {scopedFindings.length > pageSize && (
+                <div className="issues-pagination">
+                  <span className="pagination-text">
+                    Showing {(currentPage - 1) * pageSize + 1} to {Math.min(currentPage * pageSize, scopedFindings.length)} of {scopedFindings.length} issues
+                  </span>
+                  <div className="pagination-btns">
+                    <button className="page-nav-btn" onClick={() => setCurrentPage((p) => Math.max(1, p - 1))} disabled={currentPage === 1}>
+                      <ChevronRight size={13} style={{ transform: 'rotate(180deg)' }} />
+                    </button>
+                    <span className="page-current-num">{currentPage} / {totalPages}</span>
+                    <button className="page-nav-btn" onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages}>
+                      <ChevronRight size={13} />
+                    </button>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+
+          {/* Detail card */}
+          {selectedIssue && (
+            <div className="repo-detail-card">
+              <div className="detail-header-row">
+                <div className="detail-title-group">
+                  <span className="detail-icon-circle" style={{ background: SEVERITY_BG[selectedIssue.severity], color: SEVERITY_COLORS[selectedIssue.severity] }}>
+                    <AlertTriangle size={15} />
+                  </span>
+                  <h2 className="detail-title">{selectedIssue.type}</h2>
+                  <span className="detail-sev-pill" style={{ color: SEVERITY_COLORS[selectedIssue.severity], background: SEVERITY_BG[selectedIssue.severity] }}>
+                    {selectedIssue.severity}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <span className="detail-cwe-pill">{selectedIssue.cwe.split(':')[0]}</span>
+                  <span className="detail-cwe-pill">{selectedIssue.owasp.split(' ')[0].replace(':2021', '')}</span>
+                </div>
+              </div>
+
+              <div className="detail-meta-row">
+                <span><strong>File:</strong> {selectedIssue.file}</span>
+                <span className="meta-sep">•</span>
+                <span><strong>Line:</strong> {selectedIssue.line}</span>
+              </div>
+
+              <div className="detail-section">
+                <div className="detail-section-heading">Description</div>
+                <p className="detail-section-body">{selectedIssue.description}</p>
+              </div>
+              <div className="detail-section">
+                <div className="detail-section-heading">Impact</div>
+                <p className="detail-section-body">{selectedIssue.impact}</p>
+              </div>
+              <div className="detail-section">
+                <div className="detail-section-heading">Recommendation</div>
+                <p className="detail-section-body">{selectedIssue.recommendation}</p>
+              </div>
+
+              {/* Side-by-side code */}
+              <div className="code-comparison-grid repo-code-grid">
+                <div className="code-box vulnerable-box">
+                  <div className="code-box-header">
+                    <div className="code-box-title">
+                      <span className="vuln-header-badge"><ShieldAlert size={14} /></span>
+                      <span className="code-box-heading" style={{ color: '#ff4d6d' }}>Vulnerable Code</span>
+                      <span className="code-box-tag">(Line {selectedIssue.line})</span>
+                    </div>
+                  </div>
+                  <div className="code-scroll-area">
+                    <table className="code-table">
+                      <tbody>
+                        {selectedIssue.before.map((l, i) => (
+                          <tr className="code-row" key={`b${i}`}>
+                            <td className="code-line-num-cell"><span className="line-num-text">{selectedIssue.line - selectedIssue.before.length + i}</span></td>
+                            <td className="code-text-cell"><pre className="code-line-pre">{l || ' '}</pre></td>
+                          </tr>
+                        ))}
+                        <tr className="code-row vuln-row-highlight vuln-row-active">
+                          <td className="code-line-num-cell"><span className="line-num-text">{selectedIssue.line}</span><span className="vuln-indicator-icon">!</span></td>
+                          <td className="code-text-cell"><pre className="code-line-pre">{selectedIssue.vuln}</pre></td>
+                        </tr>
+                        {selectedIssue.after.map((l, i) => (
+                          <tr className="code-row" key={`a${i}`}>
+                            <td className="code-line-num-cell"><span className="line-num-text">{selectedIssue.line + 1 + i}</span></td>
+                            <td className="code-text-cell"><pre className="code-line-pre">{l || ' '}</pre></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div className="comparison-arrow-badge"><ArrowRight size={18} color="#fff" /></div>
+
+                <div className="code-box secure-box">
+                  <div className="code-box-header">
+                    <div className="code-box-title">
+                      <span className="secure-header-badge"><ShieldCheck size={14} /></span>
+                      <span className="code-box-heading" style={{ color: '#4fd08a' }}>Fixed Code</span>
+                      <span className="code-box-tag">(Suggested)</span>
+                    </div>
+                  </div>
+                  <div className="code-scroll-area">
+                    <table className="code-table">
+                      <tbody>
+                        {selectedIssue.before.map((l, i) => (
+                          <tr className="code-row" key={`b${i}`}>
+                            <td className="code-line-num-cell"><span className="line-num-text">{selectedIssue.line - selectedIssue.before.length + i}</span></td>
+                            <td className="code-text-cell"><pre className="code-line-pre">{l || ' '}</pre></td>
+                          </tr>
+                        ))}
+                        <tr className="code-row secure-row-highlight secure-row-active">
+                          <td className="code-line-num-cell"><span className="line-num-text">{selectedIssue.line}</span><span className="secure-indicator-icon">✓</span></td>
+                          <td className="code-text-cell"><pre className="code-line-pre">{selectedIssue.fix}</pre></td>
+                        </tr>
+                        {selectedIssue.after.map((l, i) => (
+                          <tr className="code-row" key={`a${i}`}>
+                            <td className="code-line-num-cell"><span className="line-num-text">{selectedIssue.line + 1 + i}</span></td>
+                            <td className="code-text-cell"><pre className="code-line-pre">{l || ' '}</pre></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+
+              <div className="detail-actions-row">
+                <span className="empty-sub" style={{ marginTop: 0, marginRight: 'auto' }}>Line: {selectedIssue.line} · Column: 1</span>
+                <button className="sec-action-btn" disabled title="Wire up to your editor integration">
+                  <ExternalLink size={14} /> Open in Editor
+                </button>
+                <button className="sec-action-btn" onClick={handleCopyFix}>
+                  {copiedFix ? <Check size={14} color="#4fd08a" /> : <Copy size={14} />} {copiedFix ? 'Copied!' : 'Copy Fix'}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </>
+  );
+}

@@ -10,6 +10,10 @@ import {
 } from 'lucide-react';
 import './App.css';
 import ProjectsPanel from './ProjectsPanel';
+import ResultsPanel from './components/ResultsPanel';
+import FolderScanResults from './components/FolderScanResults';
+import ChatBot from './components/ChatBot';
+import GitHubCallback from './components/GitHubCallback';
 
 const API_URL = 'http://localhost:4000';
 
@@ -176,6 +180,7 @@ const SCAN_TYPES = [
   { key: 'config', label: 'Configuration', desc: '.env, .json, .yml, docker etc.', icon: Sliders },
   { key: 'deps', label: 'Dependencies', desc: 'package.json, requirements.txt', icon: Package },
   { key: 'upload', label: 'File Upload', desc: 'Upload any file to scan', icon: UploadCloud },
+  { key: 'folder', label: 'Upload Folder', desc: 'Scan entire folder/directory', icon: Folder },
 ];
 
 // "3. Scan Configuration" checkboxes. Only `secrets` maps to a real backend
@@ -550,25 +555,48 @@ function FindingItem({ f }) {
 }
 
 // Code Scan history row
-function HistoryRow({ scan }) {
+function HistoryRow({ scan, onSelectScan }) {
   const [open, setOpen] = useState(false);
-  const findings = typeof scan.findings === 'string' ? JSON.parse(scan.findings) : scan.findings;
+  const findings = typeof scan.findings === 'string' ? JSON.parse(scan.findings) : (scan.findings || []);
 
   return (
     <div className="finding-card" style={{ cursor: 'pointer' }}>
       <div className="finding-top" onClick={() => setOpen(!open)}>
-        <span className="finding-line">{formatDate(scan.scannedAt)}</span>
-        {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        <span className="finding-line">
+          <strong>{scan.scanUid || `Scan #${scan.id}`}</strong> • {formatDate(scan.scannedAt)}
+        </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          {onSelectScan && (
+            <button
+              className="text-btn"
+              style={{ color: '#a78bfa', fontSize: '12px', padding: '3px 8px', borderRadius: '5px', background: 'rgba(167, 139, 250, 0.12)' }}
+              onClick={(e) => {
+                e.stopPropagation();
+                onSelectScan(scan);
+              }}
+            >
+              <ExternalLink size={12} /> Open in Scan Results
+            </button>
+          )}
+          {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        </div>
       </div>
-      <div className="summary-row" style={{ marginTop: '8px', marginBottom: open ? '10px' : 0 }}>
+      <div
+        className="summary-row"
+        style={{ marginTop: '8px', marginBottom: open ? '10px' : 0 }}
+        onClick={() => onSelectScan && onSelectScan(scan)}
+      >
         {scan.riskLevel && (
           <div className="summary-chip" style={severityClass(scan.riskLevel) === 'sev-critical' ? CRITICAL_FALLBACK : undefined}>
             risk: {scan.riskLevel}
           </div>
         )}
-        <div className="summary-chip sev-high">{scan.highSeverity} high</div>
-        <div className="summary-chip sev-medium">{scan.mediumSeverity} medium</div>
-        <div className="summary-chip sev-low">{scan.lowSeverity} low</div>
+        <div className="summary-chip" style={{ background: 'rgba(255,60,95,0.15)', color: '#ff3c5f' }}>
+          {scan.critical ?? scan.criticalCount ?? 0} critical
+        </div>
+        <div className="summary-chip sev-high">{scan.highSeverity ?? scan.high ?? 0} high</div>
+        <div className="summary-chip sev-medium">{scan.mediumSeverity ?? scan.medium ?? 0} medium</div>
+        <div className="summary-chip sev-low">{scan.lowSeverity ?? scan.low ?? 0} low</div>
       </div>
       {open && (
         <div className="findings-list" style={{ marginTop: '10px' }}>
@@ -2311,325 +2339,23 @@ function SecurityCoveragePanel({ results, code, scanDurationMs }) {
 // ============================================================================
 
 function ScanResultsPanel({ results, history, code, scanning, onRescan, goToNav }) {
-  const [fixedMap, setFixedMap] = useState({});
-  const [activeFilter, setActiveFilter] = useState('all');
-  const [search, setSearch] = useState('');
-  const [selectedIndex, setSelectedIndex] = useState(null);
-  const [page, setPage] = useState(1);
-  const PAGE_SIZE = 10;
-
-  const findings = results?.findings || [];
-
-  // New scan came in (different results object) — reset all local UI state.
-  useEffect(() => {
-    setFixedMap({});
-    setActiveFilter('all');
-    setSearch('');
-    setSelectedIndex(null);
-    setPage(1);
-  }, [results]);
-
-  const scored = findings.map((f, i) => ({ ...f, _index: i, _score: computeRiskScore(f), _fixed: Boolean(fixedMap[i]) }));
-
-  const critical = scored.filter((f) => severityClass(f.severity) === 'sev-critical').length;
-  const high = scored.filter((f) => severityClass(f.severity) === 'sev-high').length;
-  const medium = scored.filter((f) => severityClass(f.severity) === 'sev-medium').length;
-  const low = scored.filter((f) => severityClass(f.severity) === 'sev-low').length;
-  const fixedCount = scored.filter((f) => f._fixed).length;
-  const openCount = scored.length - fixedCount;
-  const totalIssues = scored.length;
-  const remediationPct = totalIssues ? Math.round((fixedCount / totalIssues) * 100) : 0;
-
-  const uniqueLocations = new Set(scored.map((f) => locationForFinding(f))).size;
-
-  const securityScore = Math.max(0, 100 - (results?.riskScore ?? 0));
-  const scoreLabel = securityScore >= 90 ? 'Excellent' : securityScore >= 75 ? 'Good' : securityScore >= 50 ? 'Fair' : 'Poor';
-  const scoreColor = securityScore >= 90 ? '#4fd08a' : securityScore >= 75 ? '#8dd66a' : securityScore >= 50 ? '#e8a33d' : '#e2504a';
-
-  const sortedHistory = [...(history || [])].sort((a, b) => new Date(b.scannedAt) - new Date(a.scannedAt));
-  const lastScannedLabel = sortedHistory[0] ? formatDate(sortedHistory[0].scannedAt) : 'Just now';
-
-  const FILTERS = [
-    { key: 'all', label: `All (${totalIssues})` },
-    { key: 'critical', label: `Critical (${critical})` },
-    { key: 'high', label: `High (${high})` },
-    { key: 'medium', label: `Medium (${medium})` },
-    { key: 'low', label: `Low (${low})` },
-    { key: 'fixed', label: `Fixed (${fixedCount})` },
-    { key: 'open', label: `Open (${openCount})` },
-  ];
-
-  let filtered = scored;
-  if (activeFilter === 'critical') filtered = filtered.filter((f) => severityClass(f.severity) === 'sev-critical');
-  else if (activeFilter === 'high') filtered = filtered.filter((f) => severityClass(f.severity) === 'sev-high');
-  else if (activeFilter === 'medium') filtered = filtered.filter((f) => severityClass(f.severity) === 'sev-medium');
-  else if (activeFilter === 'low') filtered = filtered.filter((f) => severityClass(f.severity) === 'sev-low');
-  else if (activeFilter === 'fixed') filtered = filtered.filter((f) => f._fixed);
-  else if (activeFilter === 'open') filtered = filtered.filter((f) => !f._fixed);
-
-  if (search.trim()) {
-    const q = search.trim().toLowerCase();
-    filtered = filtered.filter((f) => `${f.type || ''} ${f.explanation || ''} ${f.packageName || ''}`.toLowerCase().includes(q));
+  if (results && results.fileTree) {
+    return (
+      <FolderScanResults
+        scanData={results}
+        onRescan={onRescan}
+        onNavigate={goToNav}
+      />
+    );
   }
-
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  const pageClamped = Math.min(page, totalPages);
-  const pageItems = filtered.slice((pageClamped - 1) * PAGE_SIZE, pageClamped * PAGE_SIZE);
-
-  const selected = selectedIndex !== null ? scored.find((f) => f._index === selectedIndex) : null;
-
-  function toggleFixed(index) {
-    setFixedMap((prev) => ({ ...prev, [index]: !prev[index] }));
-  }
-
-  function handleCopyFix(fix) {
-    navigator.clipboard?.writeText(fix || '');
-  }
-
-  const hasData = Boolean(results);
 
   return (
-    <section className="panel wide-panel">
-      <div className="panel-head">
-        <div className="panel-icon"><FileText size={18} /></div>
-        <div>
-          <h2>Scan Results</h2>
-          <p>Detailed results of security vulnerabilities found in your most recent scan.</p>
-        </div>
-        {hasData && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginLeft: 'auto' }}>
-            <span style={{ fontSize: '12.5px', opacity: 0.6, display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <Clock size={13} /> Last scanned: {lastScannedLabel}
-            </span>
-            <button className="scan-btn" style={{ padding: '8px 14px' }} onClick={onRescan} disabled={scanning || !code?.trim()}>
-              <Search size={14} /> {scanning ? 'Scanning…' : 'Rescan'}
-            </button>
-          </div>
-        )}
-      </div>
-
-      {!hasData && (
-        <div className="empty-state">
-          <FileText size={56} className="empty-icon" />
-          <h3>No scan run yet.</h3>
-          <p className="empty-sub">Head to Code Scan to run one — results mirror here.</p>
-        </div>
-      )}
-
-      {hasData && totalIssues === 0 && (
-        <div className="empty-state">
-          <CheckCircle2 size={56} className="empty-icon success" />
-          <h3>No issues found. Nice and clean.</h3>
-        </div>
-      )}
-
-      {hasData && totalIssues > 0 && (
-        <>
-          <div className="dash-mid-grid" style={{ marginBottom: '16px', gridTemplateColumns: 'repeat(4, 1fr) 1.4fr' }}>
-            <div className="dash-sub-panel">
-              <h3>Security Score</h3>
-              <div className="dash-donut-row">
-                <svg width="90" height="90" viewBox="0 0 42 42">
-                  <circle cx="21" cy="21" r="15.9" fill="transparent" stroke="#232633" strokeWidth="6" />
-                  <circle
-                    cx="21" cy="21" r="15.9" fill="transparent"
-                    stroke={scoreColor} strokeWidth="6"
-                    strokeDasharray={`${securityScore} ${100 - securityScore}`}
-                    strokeDashoffset="25"
-                  />
-                  <text x="21" y="19" textAnchor="middle" fontSize="8" fill="#e8e9ee" fontWeight="700">{securityScore}</text>
-                  <text x="21" y="26" textAnchor="middle" fontSize="3.4" fill="#5c5f6d">/100</text>
-                </svg>
-                <div className="dash-stat-sub" style={{ color: scoreColor, fontWeight: 600 }}>{scoreLabel}</div>
-              </div>
-            </div>
-
-            <div className="dash-stat-card">
-              <div className="dash-stat-head"><ShieldAlert size={14} /> Issues Found</div>
-              <div className="dash-stat-value">{totalIssues}</div>
-            </div>
-            <div className="dash-stat-card">
-              <div className="dash-stat-head"><CheckCircle2 size={14} /> Fixed</div>
-              <div className="dash-stat-value" style={{ color: '#4fd08a' }}>{fixedCount}</div>
-              <div className="dash-stat-sub">{remediationPct}% resolved</div>
-            </div>
-            <div className="dash-stat-card">
-              <div className="dash-stat-head"><AlertTriangle size={14} /> Remaining</div>
-              <div className="dash-stat-value" style={{ color: '#e8a33d' }}>{openCount}</div>
-            </div>
-            <div className="dash-sub-panel">
-              <h3>Remediation Progress</h3>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
-                <span style={{ fontSize: '12px', opacity: 0.6 }}>{uniqueLocations} location{uniqueLocations !== 1 ? 's' : ''} affected</span>
-                <span style={{ fontSize: '13px', fontWeight: 700, color: '#a98cf0' }}>{remediationPct}% Completed</span>
-              </div>
-              <div className="dash-cat-track" style={{ width: '100%' }}>
-                <div className="dash-cat-fill" style={{ width: `${remediationPct}%`, background: '#a98cf0' }} />
-              </div>
-              <div style={{ display: 'flex', gap: '14px', marginTop: '8px', fontSize: '12px' }}>
-                <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><span className="dash-dot" style={{ background: '#4fd08a' }} />{fixedCount} Fixed</span>
-                <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><span className="dash-dot" style={{ background: '#e8a33d' }} />{openCount} Remaining</span>
-              </div>
-            </div>
-          </div>
-
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', alignItems: 'center', marginBottom: '14px' }}>
-            {FILTERS.map((f) => (
-              <button
-                key={f.key}
-                className="text-btn"
-                style={{
-                  padding: '6px 12px', borderRadius: '8px',
-                  background: activeFilter === f.key ? 'rgba(169,140,240,0.18)' : 'rgba(255,255,255,0.03)',
-                  border: activeFilter === f.key ? '1px solid rgba(169,140,240,0.5)' : '1px solid rgba(255,255,255,0.08)',
-                  color: activeFilter === f.key ? '#a98cf0' : undefined,
-                }}
-                onClick={() => { setActiveFilter(f.key); setPage(1); }}
-              >
-                {f.label}
-              </button>
-            ))}
-            <div style={{ marginLeft: 'auto' }}>
-              <input
-                className="code-input"
-                style={{ height: 'auto', padding: '8px 12px', width: '220px' }}
-                placeholder="Search issues..."
-                value={search}
-                onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-              />
-            </div>
-          </div>
-
-          <div className="content-grid">
-            <div className="left-col">
-              <section className="panel">
-                <div className="secrets-table-wrap">
-                  <table className="secrets-table">
-                    <thead>
-                      <tr>
-                        <th>Issue / Location</th><th>Severity</th><th>Risk Score</th><th>Status</th><th>Action</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {pageItems.map((f) => {
-                        const isCritical = severityClass(f.severity) === 'sev-critical';
-                        const isSelected = selectedIndex === f._index;
-                        return (
-                          <tr
-                            key={f._index}
-                            style={{ cursor: 'pointer', background: isSelected ? 'rgba(169,140,240,0.08)' : undefined }}
-                            onClick={() => setSelectedIndex(f._index)}
-                          >
-                            <td>
-                              <div style={{ fontWeight: 600 }}>{f.type}</div>
-                              <div style={{ fontSize: '11.5px', opacity: 0.55, fontFamily: 'monospace' }}>{locationForFinding(f)}</div>
-                            </td>
-                            <td>
-                              <span className={`sev-pill ${severityClass(f.severity)}`} style={isCritical ? CRITICAL_FALLBACK : undefined}>{f.severity}</span>
-                            </td>
-                            <td style={{ fontWeight: 700 }}>{(f._score / 10).toFixed(1)}/10</td>
-                            <td>
-                              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '12.5px' }}>
-                                <span className="dash-dot" style={{ background: f._fixed ? '#4fd08a' : '#e2504a' }} />
-                                {f._fixed ? 'Fixed' : 'Open'}
-                              </span>
-                            </td>
-                            <td onClick={(e) => e.stopPropagation()}>
-                              <button className="icon-btn" onClick={() => toggleFixed(f._index)} aria-label={f._fixed ? 'Mark as open' : 'Mark as fixed'}>
-                                {f._fixed ? <AlertTriangle size={14} /> : <Check size={14} />}
-                              </button>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-
-                {filtered.length === 0 && (
-                  <p className="empty-sub" style={{ marginTop: '10px' }}>No issues match your filters.</p>
-                )}
-
-                {filtered.length > 0 && (
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '12px' }}>
-                    <span style={{ fontSize: '12.5px', opacity: 0.6 }}>
-                      Showing {(pageClamped - 1) * PAGE_SIZE + 1} to {Math.min(pageClamped * PAGE_SIZE, filtered.length)} of {filtered.length} results
-                    </span>
-                    <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
-                      <button className="icon-btn" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={pageClamped === 1} aria-label="Previous page">
-                        <ChevronRight size={14} style={{ transform: 'rotate(180deg)' }} />
-                      </button>
-                      <span style={{ fontSize: '12.5px' }}>{pageClamped} / {totalPages}</span>
-                      <button className="icon-btn" onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={pageClamped === totalPages} aria-label="Next page">
-                        <ChevronRight size={14} />
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </section>
-            </div>
-
-            <section className="panel risk-side-panel">
-              {!selected && (
-                <div className="empty-state">
-                  <Brain size={40} className="empty-icon" />
-                  <h3 style={{ fontSize: '14px' }}>Select an issue</h3>
-                  <p className="empty-sub">Click a row to see the AI explanation and suggested fix.</p>
-                </div>
-              )}
-              {selected && (
-                <>
-                  <div className="panel-head">
-                    <div><h2 style={{ fontSize: '16px' }}>{selected.type}</h2></div>
-                    <span className={`sev-pill ${severityClass(selected.severity)}`} style={severityClass(selected.severity) === 'sev-critical' ? CRITICAL_FALLBACK : undefined}>
-                      {selected.severity}
-                    </span>
-                    <button className="icon-btn" style={{ marginLeft: '8px' }} onClick={() => setSelectedIndex(null)} aria-label="Close">
-                      <X size={14} />
-                    </button>
-                  </div>
-                  <div style={{ fontSize: '12px', opacity: 0.6, marginBottom: '12px' }}>{locationForFinding(selected)}</div>
-
-                  <div className="finding-card">
-                    <div className="finding-type" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><Brain size={13} /> AI Explanation</div>
-                    <div className="finding-preview" style={{ marginTop: '6px' }}>{selected.explanation || 'No explanation available for this finding.'}</div>
-                    {typeof selected.confidence === 'number' && (
-                      <div style={{ marginTop: '10px' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11.5px', opacity: 0.6, marginBottom: '4px' }}>
-                          <span>AI Confidence</span><span>{Math.round(selected.confidence * 100)}%</span>
-                        </div>
-                        <div className="dash-cat-track"><div className="dash-cat-fill" style={{ width: `${Math.round(selected.confidence * 100)}%` }} /></div>
-                      </div>
-                    )}
-                  </div>
-
-                  {selected.matchPreview && (
-                    <div className="finding-card">
-                      <div className="finding-type">Flagged Code</div>
-                      <div className="finding-preview" style={{ fontFamily: 'monospace', fontSize: '12px', whiteSpace: 'pre-wrap' }}>{selected.matchPreview}</div>
-                    </div>
-                  )}
-
-                  <div className="finding-card">
-                    <div className="finding-type" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><Wrench size={13} /> Suggested Fix</div>
-                    <div className="finding-preview" style={{ marginTop: '6px' }}>{selected.fix || 'No fix suggestion available.'}</div>
-                  </div>
-
-                  <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
-                    <button className="scan-btn" style={{ flex: 1 }} onClick={() => handleCopyFix(selected.fix)}>
-                      <Copy size={14} /> Copy Fix
-                    </button>
-                    <button className="text-btn" style={{ flex: 1, justifyContent: 'center' }} onClick={() => goToNav('Code Scan')}>
-                      <ExternalLink size={13} /> View in Code
-                    </button>
-                  </div>
-                </>
-              )}
-            </section>
-          </div>
-        </>
-      )}
-    </section>
+    <ResultsPanel
+      scanData={results}
+      onRescan={onRescan}
+      onNavigate={goToNav}
+      scanning={scanning}
+    />
   );
 }
 
@@ -3000,12 +2726,18 @@ function ReportsPanel({ results, history, historyLoading }) {
 }
 
 export default function App() {
+  // Handle GitHub OAuth callback route
+  if (window.location.pathname === '/auth/github/callback') {
+    return <GitHubCallback />;
+  }
+
   const [code, setCode] = useState('');
   const [activeNav, setActiveNav] = useState('Code Scan');
   const [scanning, setScanning] = useState(false);
   const [results, setResults] = useState(null);
   const [error, setError] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [entropyOn, setEntropyOn] = useState(true);
   const [autoClear, setAutoClear] = useState(false);
   const [theme, setTheme] = useState('dark');
@@ -3018,6 +2750,7 @@ export default function App() {
   // In-memory only for now — no backend table for this yet, so it resets on
   // refresh. Wire to a real endpoint later if you want it to persist.
   const [savedSnippets, setSavedSnippets] = useState([]);
+  const [selectedProject, setSelectedProject] = useState(null);
 
   // Security Scan tab state
   const [scanType, setScanType] = useState('code');
@@ -3027,6 +2760,12 @@ export default function App() {
   const [analysisDepth, setAnalysisDepth] = useState('standard');
   const [uploadFileName, setUploadFileName] = useState('');
   const [scanDurationMs, setScanDurationMs] = useState(null);
+
+  // Folder upload state
+  const [folderFiles, setFolderFiles] = useState([]);
+  const [folderName, setFolderName] = useState('');
+  const [folderFileCount, setFolderFileCount] = useState(0);
+  const [folderScanProgress, setFolderScanProgress] = useState(null);
 
   function toggleCheck(key) {
     setChecks((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -3041,11 +2780,128 @@ export default function App() {
     reader.readAsText(file);
   }
 
+  // Supported file extensions for scanning
+  const SUPPORTED_EXTENSIONS = [
+    '.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx',
+    '.py', '.pyw',
+    '.java',
+    '.cpp', '.cc', '.cxx', '.c', '.h', '.hpp',
+    '.php',
+    '.go',
+    '.rb',
+    '.json', '.yml', '.yaml',
+  ];
+
+  // Directories to always ignore
+  const IGNORED_DIRS = [
+    'node_modules', '.git', 'dist', 'build', 'coverage',
+    'cache', '.cache', '.next', '.nuxt', 'vendor',
+    '__pycache__', '.tox', '.mypy_cache', '.pytest_cache',
+    '.gradle', '.mvn', 'target', 'bin', 'obj',
+    '.terraform', '.vagrant', '.docker',
+  ];
+
+  // Max single file size: 500KB. Max total payload: 40MB. Max files: 500.
+  const MAX_FILE_SIZE = 500 * 1024;
+  const MAX_TOTAL_SIZE = 40 * 1024 * 1024;
+  const MAX_FILES = 500;
+  const CHUNK_SIZE = 200;
+
+  function handleFolderUpload(e) {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+
+    // Get folder name from first file's webkitRelativePath
+    const firstPath = files[0]?.webkitRelativePath || '';
+    const folder = firstPath.split('/')[0] || 'uploaded-folder';
+
+    // Filter: ignored dirs, unsupported extensions, binary/large files
+    const supported = [];
+    let totalSize = 0;
+    const skipped = { ignored: 0, extension: 0, oversized: 0, binary: 0 };
+
+    for (const f of files) {
+      const relativePath = f.webkitRelativePath || f.name;
+      const parts = relativePath.split('/');
+
+      // Skip ignored directories
+      if (parts.some((p) => IGNORED_DIRS.includes(p))) {
+        skipped.ignored++;
+        continue;
+      }
+
+      // Check extension
+      const ext = '.' + f.name.split('.').pop().toLowerCase();
+      if (!SUPPORTED_EXTENSIONS.includes(ext)) {
+        skipped.extension++;
+        continue;
+      }
+
+      // Skip oversized files
+      if (f.size > MAX_FILE_SIZE) {
+        skipped.oversized++;
+        continue;
+      }
+
+      // Skip if total would exceed limit
+      if (totalSize + f.size > MAX_TOTAL_SIZE) {
+        skipped.oversized++;
+        continue;
+      }
+
+      // Skip if too many files
+      if (supported.length >= MAX_FILES) {
+        skipped.oversized++;
+        continue;
+      }
+
+      totalSize += f.size;
+      supported.push(f);
+    }
+
+    setFolderName(folder);
+    setFolderFileCount(supported.length);
+    setFolderScanProgress({ scanned: 0, total: supported.length, issues: 0, skipped: Object.values(skipped).reduce((a, b) => a + b, 0), chunks: 1, chunk: 1, phase: 'scanning' });
+
+    // Read all filtered files
+    const filePromises = supported.map((f) => {
+      return new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          const relativePath = f.webkitRelativePath || f.name;
+          resolve({ name: relativePath, content: String(ev.target.result || '') });
+        };
+        reader.onerror = () => resolve({ name: f.webkitRelativePath || f.name, content: '' });
+        reader.readAsText(f);
+      });
+    });
+
+    Promise.all(filePromises).then((fileData) => {
+      setFolderFiles(fileData);
+    });
+  }
+
   useEffect(() => {
     if (activeNav === 'Scan History' || activeNav === 'Dashboard') {
       fetchHistory();
     }
   }, [activeNav]);
+
+  // Initial load: fetch history only — do NOT restore the last scan as current result.
+  // Current scan data is created only by an explicit scan/upload/paste action.
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch(`${API_URL}/history`);
+        if (res.ok) {
+          const data = await res.json();
+          setHistory(data.history || []);
+        }
+      } catch (err) {
+        console.warn('Initial history load notice:', err.message);
+      }
+    })();
+  }, []);
 
   async function fetchHistory() {
     setHistoryLoading(true);
@@ -3066,53 +2922,214 @@ export default function App() {
     }
   }
 
+  async function handleSelectScanFromHistory(scan) {
+    try {
+      const res = await fetch(`${API_URL}/scan/${scan.id}`);
+      if (res.ok) {
+        const fullScan = await res.json();
+        setResults(fullScan);
+        if (fullScan.id) localStorage.setItem('securecode_last_scan_id', fullScan.id);
+        setActiveNav('Scan Results');
+      } else {
+        setResults(scan);
+        setActiveNav('Scan Results');
+      }
+    } catch {
+      setResults(scan);
+      setActiveNav('Scan Results');
+    }
+  }
+
   async function handleScan() {
-    if (!code.trim() || scanning) return;
+    // For folder scans, check if files are loaded; for others, check code
+    if (scanType === 'folder' ? folderFiles.length === 0 : !code.trim()) return;
+    if (scanning) return;
+
     setScanning(true);
     setError(null);
     setScanDurationMs(null);
     const startedAt = Date.now();
+
     try {
-      const trimmed = code.trim();
-      let body = { code, entropyEnabled: checks.secrets };
+      if (scanType === 'folder' && folderFiles.length > 0) {
+        // ---- FOLDER SCAN: chunked upload with progress ----
+        const totalFiles = folderFiles.length;
+        const totalChunks = Math.ceil(totalFiles / CHUNK_SIZE);
+        let allFindings = [];
+        let allFilesCorrected = {};
+        let allFindingsByFile = {};
+        let allFilesOriginal = {};
+        let mergedFileTree = null;
+        let firstResult = null;
 
-      // Dependencies tab always treats the input as a package.json. For the
-      // other tabs, auto-detect: if the pasted content is valid JSON with a
-      // dependencies/devDependencies key, route it the same way. The backend
-      // still needs a non-empty `code` field, so we send a harmless
-      // placeholder alongside packageJson.
-      const looksLikePackageJson = (() => {
-        if (!trimmed.startsWith('{')) return false;
-        try {
-          const parsed = JSON.parse(trimmed);
-          return Boolean(parsed.dependencies || parsed.devDependencies);
-        } catch {
-          return false;
+        setFolderScanProgress({ scanned: 0, total: totalFiles, issues: 0, skipped: 0, chunks: totalChunks, chunk: 1, phase: 'scanning' });
+
+        for (let chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++) {
+          const start = chunkIdx * CHUNK_SIZE;
+          const end = Math.min(start + CHUNK_SIZE, totalFiles);
+          const chunk = folderFiles.slice(start, end);
+
+          const body = {
+            files: chunk,
+            entropyEnabled: checks.secrets,
+            fileName: folderName || undefined,
+            checks,
+            scanMode: analysisDepth,
+          };
+
+          const res = await fetch(`${API_URL}/scan`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+
+          if (!res.ok) {
+            const errText = await res.text().catch(() => '');
+            throw new Error(`Chunk ${chunkIdx + 1}/${totalChunks} failed (${res.status}): ${errText}`);
+          }
+
+          const data = await res.json();
+          if (!firstResult) firstResult = data;
+
+          // Merge findings (backend already attaches fileName per finding)
+          const chunkFindings = (data.findings || []);
+          allFindings = allFindings.concat(chunkFindings);
+
+          // Merge file tree
+          if (data.fileTree) {
+            if (!mergedFileTree) {
+              mergedFileTree = data.fileTree;
+            } else {
+              // Merge children into existing tree
+              mergeFileTree(mergedFileTree, data.fileTree);
+            }
+          }
+
+          // Merge filesCorrected, findingsByFile, and filesOriginal
+          if (data.filesCorrected) {
+            Object.assign(allFilesCorrected, data.filesCorrected);
+          }
+          if (data.findingsByFile) {
+            Object.assign(allFindingsByFile, data.findingsByFile);
+          }
+          if (data.filesOriginal) {
+            Object.assign(allFilesOriginal, data.filesOriginal);
+          }
+
+          // Update progress
+          setFolderScanProgress({
+            scanned: end,
+            total: totalFiles,
+            issues: allFindings.length,
+            skipped: 0,
+            chunks: totalChunks,
+            chunk: chunkIdx + 1,
+            phase: chunkIdx < totalChunks - 1 ? 'scanning' : 'finalizing',
+          });
         }
-      })();
 
-      if (scanType === 'deps' || looksLikePackageJson) {
-        body = {
-          code: '// package.json dependency scan',
-          packageJson: trimmed,
-          entropyEnabled: checks.secrets,
+        // Build final result from first chunk result, overriding with merged data
+        const finalResult = {
+          ...firstResult,
+          findings: allFindings,
+          totalFindings: allFindings.length,
+          critical: allFindings.filter((f) => f.severity === 'Critical').length,
+          high: allFindings.filter((f) => f.severity === 'High').length,
+          medium: allFindings.filter((f) => f.severity === 'Medium').length,
+          low: allFindings.filter((f) => f.severity === 'Low').length,
+          info: allFindings.filter((f) => f.severity === 'Info').length,
+          criticalCount: allFindings.filter((f) => f.severity === 'Critical').length,
+          highCount: allFindings.filter((f) => f.severity === 'High').length,
+          mediumCount: allFindings.filter((f) => f.severity === 'Medium').length,
+          lowCount: allFindings.filter((f) => f.severity === 'Low').length,
+          infoCount: allFindings.filter((f) => f.severity === 'Info').length,
+          highSeverity: allFindings.filter((f) => f.severity === 'High').length,
+          mediumSeverity: allFindings.filter((f) => f.severity === 'Medium').length,
+          lowSeverity: allFindings.filter((f) => f.severity === 'Low').length,
+          fileTree: mergedFileTree,
+          filesCorrected: allFilesCorrected,
+          filesOriginal: allFilesOriginal,
+          findingsByFile: allFindingsByFile,
+          folderName: folderName || firstResult?.folderName,
         };
-      }
 
-      const res = await fetch(`${API_URL}/scan`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) throw new Error(`Scan failed (${res.status})`);
-      const data = await res.json();
-      setResults(data);
-      setScanDurationMs(Date.now() - startedAt);
-      if (autoClear) setCode('');
-      // Refresh history in the background so the Dashboard/Scan History
-      // reflect this scan immediately without waiting for a tab switch.
-      fetchHistory();
+        // Recompute risk score from merged findings
+        const counts = { Critical: 0, High: 0, Medium: 0, Low: 0 };
+        for (const f of allFindings) {
+          const sev = (f.severity || '').toLowerCase();
+          if (sev === 'critical') counts.Critical++;
+          else if (sev === 'high') counts.High++;
+          else if (sev === 'medium') counts.Medium++;
+          else if (sev === 'low') counts.Low++;
+        }
+        const penalty =
+          Math.min(51, counts.Critical * 17) +
+          Math.min(30, counts.High * 6) +
+          Math.min(15, counts.Medium * 3) +
+          Math.min(8, counts.Low * 1);
+        finalResult.securityScore = Math.max(0, 100 - penalty);
+        finalResult.riskScore = 100 - finalResult.securityScore;
+        finalResult.riskLevel =
+          finalResult.riskScore >= 70 ? 'Critical Risk' :
+          finalResult.riskScore >= 40 ? 'High Risk' :
+          finalResult.riskScore >= 15 ? 'Medium Risk' : 'Low Risk';
+
+        setResults(finalResult);
+        setScanDurationMs(Date.now() - startedAt);
+        if (finalResult.id) {
+          try { localStorage.setItem('securecode_last_scan_id', finalResult.id); } catch {}
+        }
+
+        setFolderScanProgress(null);
+        setActiveNav('Scan Results');
+        fetchHistory();
+      } else {
+        // ---- SINGLE FILE / CODE / CONFIG / DEPS SCAN (unchanged) ----
+        const trimmed = code.trim();
+        let body = {
+          code,
+          entropyEnabled: checks.secrets,
+          fileName: uploadFileName || undefined,
+          checks,
+          scanMode: analysisDepth,
+        };
+
+        const looksLikePackageJson = (() => {
+          if (!trimmed.startsWith('{')) return false;
+          try {
+            const parsed = JSON.parse(trimmed);
+            return Boolean(parsed.dependencies || parsed.devDependencies);
+          } catch { return false; }
+        })();
+
+        if (scanType === 'deps' || looksLikePackageJson) {
+          body = {
+            code: '// package.json dependency scan',
+            packageJson: trimmed,
+            entropyEnabled: checks.secrets,
+            checks,
+            scanMode: analysisDepth,
+          };
+        }
+
+        const res = await fetch(`${API_URL}/scan`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) throw new Error(`Scan failed (${res.status})`);
+        const data = await res.json();
+        setResults(data);
+        setScanDurationMs(Date.now() - startedAt);
+        if (data.id) {
+          try { localStorage.setItem('securecode_last_scan_id', data.id); } catch {}
+        }
+        if (autoClear) setCode('');
+        setActiveNav('Scan Results');
+        fetchHistory();
+      }
     } catch (err) {
+      setFolderScanProgress(null);
       setError(
         err.message === 'Failed to fetch'
           ? "Can't reach the scanner backend. Is it running on localhost:4000?"
@@ -3123,10 +3140,24 @@ export default function App() {
     }
   }
 
+  // Merge two file trees (recursive)
+  function mergeFileTree(target, source) {
+    if (!source || !source.children) return;
+    if (!target.children) target.children = {};
+    for (const [key, child] of Object.entries(source.children)) {
+      if (!target.children[key]) {
+        target.children[key] = child;
+      } else if (child.type === 'dir' && target.children[key].type === 'dir') {
+        mergeFileTree(target.children[key], child);
+      }
+    }
+  }
+
   function handleClear() {
     setCode('');
     setResults(null);
     setError(null);
+    setFolderScanProgress(null);
   }
 
   function goToNav(label) {
@@ -3207,7 +3238,7 @@ export default function App() {
           {!historyLoading && !historyError && allHistory.length > 0 && (
             <div className="findings-list">
               {allHistory.map((scan) => (
-                <HistoryRow key={scan.id} scan={scan} />
+                <HistoryRow key={scan.id} scan={scan} onSelectScan={handleSelectScanFromHistory} />
               ))}
             </div>
           )}
@@ -3262,7 +3293,7 @@ export default function App() {
     }
 
     if (activeNav === 'Projects') {
-      return <ProjectsPanel />;
+      return <ProjectsPanel onProjectSelect={setSelectedProject} />;
     }
 
     if (activeNav === 'Saved Snippets') {
@@ -3319,7 +3350,18 @@ export default function App() {
       );
     }
 
+    if (activeNav === 'Projects') {
+      return (
+        <ProjectsPanel
+          onProjectSelect={setSelectedProject}
+          activeProject={selectedProject}
+        />
+      );
+    }
+
     if (activeNav === 'Settings') {
+
+
       return (
         <section className="panel wide-panel">
           <div className="panel-head">
@@ -3378,60 +3420,73 @@ export default function App() {
   }
 
   return (
-    <div className={`app ${theme === 'light' ? 'theme-light' : ''}`}>
+    <div className={`app ${theme === 'light' ? 'theme-light' : ''} ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
       {sidebarOpen && <div className="backdrop" onClick={() => setSidebarOpen(false)} />}
-      <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
+      <aside className={`sidebar ${sidebarOpen ? 'open' : ''} ${sidebarCollapsed ? 'collapsed' : ''}`}>
         <div className="brand">
           <div className="brand-icon"><ShieldCheck size={20} /></div>
-          <div>
-            <div className="brand-name">SecureCode</div>
-            <div className="brand-tag">Paste code. Find what's leaking.</div>
-          </div>
+          {!sidebarCollapsed && (
+            <>
+              <div>
+                <div className="brand-name">SecureCode</div>
+                <div className="brand-tag">Paste code. Find what's leaking.</div>
+              </div>
+            </>
+          )}
+          <button
+            className="sidebar-collapse-btn"
+            onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+            aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          >
+            <Menu size={18} />
+          </button>
           <button className="sidebar-close" onClick={() => setSidebarOpen(false)} aria-label="Close menu">
             <X size={18} />
           </button>
         </div>
 
-        <nav className="nav">
-          {NAV_GROUPS.map((group) => (
-            <div key={group.label} style={{ marginBottom: '18px' }}>
-              <div
-                style={{
-                  padding: '0 12px 6px',
-                  fontSize: '10px',
-                  fontWeight: 600,
-                  letterSpacing: '0.06em',
-                  textTransform: 'uppercase',
-                  opacity: 0.45,
-                }}
-              >
-                {group.label}
+        {!sidebarCollapsed && (
+          <nav className="nav">
+            {NAV_GROUPS.map((group) => (
+              <div key={group.label} style={{ marginBottom: '18px' }}>
+                <div
+                  style={{
+                    padding: '0 12px 6px',
+                    fontSize: '10px',
+                    fontWeight: 600,
+                    letterSpacing: '0.06em',
+                    textTransform: 'uppercase',
+                    opacity: 0.45,
+                  }}
+                >
+                  {group.label}
+                </div>
+                {group.items.map((item) => {
+                  const Icon = item.icon;
+                  return (
+                    <button
+                      key={item.label}
+                      className={`nav-item ${item.special !== 'modal' && activeNav === item.label ? 'active' : ''}`}
+                      onClick={() => handleNavClick(item)}
+                    >
+                      <Icon size={17} />
+                      <span>{item.label}</span>
+                    </button>
+                  );
+                })}
               </div>
-              {group.items.map((item) => {
-                const Icon = item.icon;
-                return (
-                  <button
-                    key={item.label}
-                    className={`nav-item ${item.special !== 'modal' && activeNav === item.label ? 'active' : ''}`}
-                    onClick={() => handleNavClick(item)}
-                  >
-                    <Icon size={17} />
-                    <span>{item.label}</span>
-                  </button>
-                );
-              })}
-            </div>
-          ))}
-        </nav>
+            ))}
+          </nav>
+        )}
 
-        <div className="sidebar-footer">© 2026 SecureCode<br />All rights reserved.</div>
+        {!sidebarCollapsed && (
+          <div className="sidebar-footer">© 2026 SecureCode<br />All rights reserved.</div>
+        )}
       </aside>
 
       <main className="main">
         <header className="topbar">
-          <button className="menu-btn" onClick={() => setSidebarOpen(true)} aria-label="Open menu">
-            <Menu size={20} />
-          </button>
           <div className="topbar-icon"><ShieldCheck size={20} /></div>
           <div className="topbar-text">
             <h1>Welcome to <span className="accent-grad">SecureCode</span></h1>
@@ -3515,7 +3570,17 @@ export default function App() {
                   <button
                     key={t.key}
                     className={`scan-type-card ${scanType === t.key ? 'active' : ''}`}
-                    onClick={() => setScanType(t.key)}
+                    onClick={() => {
+                      // Clean all input states on every mode switch
+                      setCode('');
+                      setUploadFileName('');
+                      setFolderFiles([]);
+                      setFolderName('');
+                      setFolderFileCount(0);
+                      setFolderScanProgress(null);
+                      setError(null);
+                      setScanType(t.key);
+                    }}
                   >
                     <Icon size={18} />
                     <div className="scan-type-label">{t.label}</div>
@@ -3539,6 +3604,19 @@ export default function App() {
                       <UploadCloud size={13} /> Upload file
                       <input type="file" onChange={handleFileUpload} style={{ display: 'none' }} />
                     </label>
+                  ) : scanType === 'folder' ? (
+                    <label className="text-btn" style={{ marginLeft: 'auto', cursor: 'pointer' }}>
+                      <Folder size={13} /> Upload folder
+                      <input
+                        type="file"
+                        /* @ts-ignore */
+                        webkitdirectory=""
+                        directory=""
+                        multiple
+                        onChange={handleFolderUpload}
+                        style={{ display: 'none' }}
+                      />
+                    </label>
                   ) : (
                     <button className="text-btn" style={{ marginLeft: 'auto' }} onClick={handleClear}>
                       <Trash2 size={13} /> Clear
@@ -3549,7 +3627,14 @@ export default function App() {
                 {scanType === 'upload' && uploadFileName && (
                   <div className="field-row"><span className="field-label">{uploadFileName}</span></div>
                 )}
+                {scanType === 'folder' && folderName && (
+                  <div className="field-row">
+                    <span className="field-label">{folderName}</span>
+                    <span style={{ marginLeft: '8px', opacity: 0.7, fontSize: '12px' }}>({folderFileCount} files)</span>
+                  </div>
+                )}
 
+                {!(scanType === 'folder' && folderFiles.length > 0) && (
                 <textarea
                   className="code-input"
                   placeholder={
@@ -3559,11 +3644,14 @@ export default function App() {
                       ? 'Paste your .env, .yml, or other config file'
                       : scanType === 'upload'
                       ? 'Upload a file above, or paste its contents here'
+                      : scanType === 'folder'
+                      ? 'Upload a folder above to scan multiple files at once'
                       : 'Paste a file, a snippet, a config, or a package.json — anything with strings in it.'
                   }
                   value={code}
                   onChange={(e) => setCode(e.target.value)}
                 />
+                )}
 
                 <div className="supports">
                   <span>Supports:</span>
@@ -3574,7 +3662,51 @@ export default function App() {
 
                 {error && <div className="scan-error"><AlertTriangle size={14} /> {error}</div>}
 
-                <button className="scan-btn" onClick={handleScan} disabled={scanning || !code.trim()}>
+                {folderScanProgress && (
+                  <div style={{
+                    padding: '12px',
+                    borderRadius: '8px',
+                    background: 'rgba(59,167,240,0.1)',
+                    border: '1px solid rgba(59,167,240,0.3)',
+                    marginBottom: '10px',
+                  }}>
+                    <div style={{ fontWeight: 600, fontSize: '13px', marginBottom: '8px', color: '#3ba7f0' }}>
+                      {folderScanProgress.phase === 'finalizing' ? 'Finalizing scan...' : 'Scanning folder...'}
+                    </div>
+                    <div style={{ fontSize: '12px', color: 'var(--text)', lineHeight: '1.8' }}>
+                      <div>Files discovered: {folderScanProgress.total}</div>
+                      <div>Files scanned: {folderScanProgress.scanned} / {folderScanProgress.total}</div>
+                      {folderScanProgress.skipped > 0 && (
+                        <div style={{ color: '#f5b942' }}>Files skipped: {folderScanProgress.skipped}</div>
+                      )}
+                      {folderScanProgress.chunks > 1 && (
+                        <div>Chunk: {folderScanProgress.chunk} / {folderScanProgress.chunks}</div>
+                      )}
+                      <div>Issues found: {folderScanProgress.issues}</div>
+                    </div>
+                    <div style={{
+                      marginTop: '8px',
+                      height: '4px',
+                      borderRadius: '2px',
+                      background: 'rgba(255,255,255,0.1)',
+                      overflow: 'hidden',
+                    }}>
+                      <div style={{
+                        height: '100%',
+                        width: `${Math.round((folderScanProgress.scanned / folderScanProgress.total) * 100)}%`,
+                        background: '#3ba7f0',
+                        borderRadius: '2px',
+                        transition: 'width 0.3s ease',
+                      }} />
+                    </div>
+                  </div>
+                )}
+
+                <button
+                  className="scan-btn"
+                  onClick={handleScan}
+                  disabled={scanning || (scanType === 'folder' ? folderFiles.length === 0 : !code.trim())}
+                >
                   <Search size={16} /> {scanning ? 'Scanning…' : 'Run Security Scan'}
                 </button>
               </section>
@@ -3599,9 +3731,9 @@ export default function App() {
                 <span className="field-label">Analysis Depth</span>
               </div>
               <select className="code-input" style={{ height: 'auto', padding: '8px 12px' }} value={analysisDepth} onChange={(e) => setAnalysisDepth(e.target.value)}>
-                <option value="quick">Quick</option>
-                <option value="standard">Standard (Recommended)</option>
-                <option value="deep">Deep</option>
+                <option value="quick">Quick (Static Only, ~1-3s)</option>
+                <option value="standard">Standard (Recommended, ~10-30s)</option>
+                <option value="deep">Deep (Static + AI Analysis, ~30-60s)</option>
               </select>
             </section>
           </div>
@@ -3701,6 +3833,22 @@ export default function App() {
           );
         })()}
       </main>
+      <ChatBot
+
+        projectId={selectedProject?.id}
+        project={selectedProject}
+        onTriggerAction={(action) => {
+          if (action.type === 'scan') {
+            if (selectedProject) {
+              setActiveNav('Projects');
+            } else {
+              setActiveNav('Code Scan');
+            }
+          } else if (action.type === 'fix' || action.type === 'push' || action.type === 'pr' || (action.type && action.type.startsWith('deploy'))) {
+            setActiveNav('Projects');
+          }
+        }}
+      />
     </div>
   );
-}
+}
