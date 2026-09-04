@@ -5,7 +5,7 @@ import {
   Package, GitBranch, Shield, Zap, X, Eye, EyeOff,
 } from 'lucide-react';
 
-const API_URL = 'http://localhost:4000';
+const API_URL = 'https://remidix-backend.onrender.com';
 
 function DeploymentDashboard({ projectId, projectName, repoUrl, branch }) {
   const [analysis, setAnalysis] = useState(null);
