@@ -7,7 +7,7 @@ import {
   Shield, ShieldCheck, ShieldAlert, Eye, Lock, Globe,
 } from 'lucide-react';
 
-const API_URL = 'http://localhost:4000';
+const API_URL = 'https://remidix-backend.onrender.com';
 
 /** Resolve owner + repo from a project object. Returns { owner, repo } or null. */
 function resolveOwnerRepo(project) {
