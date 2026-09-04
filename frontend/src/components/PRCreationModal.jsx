@@ -309,7 +309,7 @@ export default function PRCreationModal({ isOpen, onClose, project, findings, fi
                 }}>
                   <LogIn size={15} style={{ color: '#f5b942' }} />
                   <button
-                    onClick={() => window.location.href = 'http://localhost:4000/auth/github/login'}
+                    onClick={() => window.location.href = `${API_URL}/auth/github/login`}
                     style={{
                       display: 'inline-flex', alignItems: 'center', gap: '4px',
                       padding: '4px 10px', borderRadius: '4px', border: '1px solid rgba(245,185,66,0.5)',
