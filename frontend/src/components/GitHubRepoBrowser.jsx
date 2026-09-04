@@ -4,7 +4,7 @@
 import React, { useState, useEffect } from 'react';
 import { GitBranch, ChevronRight, AlertCircle, Loader, Star, Lock, Code2, RefreshCw } from 'lucide-react';
 
-const API_URL = 'http://localhost:4000';
+const API_URL = 'https://remidix-backend.onrender.com';
 
 export default function GitHubRepoBrowser({ onSelectRepo, isLoading: externalLoading }) {
   const [repos, setRepos] = useState([]);
