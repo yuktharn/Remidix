@@ -4,7 +4,7 @@ import {
   Mic, MicOff, Zap, Shield, Wrench, UploadCloud, GitCompare, Cloud, Globe, Sparkles, Check,
 } from 'lucide-react';
 
-const API_URL = 'http://localhost:4000';
+const API_URL = 'https://remidix-backend.onrender.com';
 
 function ChatBot({ projectId, project, onTriggerAction }) {
   const [open, setOpen] = useState(false);
