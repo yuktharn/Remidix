@@ -5,7 +5,7 @@ const t = setTimeout(() => ctrl.abort(), 300000); // 5 min
 console.log('Testing /ai/generate-fix with Ollama (may take a while for cold model)...');
 const start = Date.now();
 
-fetch('http://localhost:4000/ai/generate-fix', {
+fetch('https://remidix-backend.onrender.com/ai/generate-fix', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
   signal: ctrl.signal,
