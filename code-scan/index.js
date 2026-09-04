@@ -33,10 +33,21 @@ const {
 const app = express();
 
 // CORS configuration - allow credentials from frontend
-app.use(cors({
-  origin: process.env.FRONTEND_URL || "http://localhost:5173",
-  credentials: true,
-}));
+const allowedOrigins = (process.env.FRONTEND_URL || "http://localhost:5173")
+  .split(",")
+  .map((o) => o.trim());
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, origin || true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
+    credentials: true,
+  })
+);
 
 app.use(cookieParser());
 
@@ -2422,7 +2433,6 @@ app.use((err, req, res, next) => {
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`SecureCode backend running on http://localhost:${PORT}`);
 });
-
 server.on("error", (err) => {
   if (err.code === "EADDRINUSE") {
     console.error(`\n❌ Error: Port ${PORT} is already in use by another process.`);
